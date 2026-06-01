@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Go
+/agent-runner/dist/
+*.exe
+*.test
+*.out
+
+# Segreti / locali
+.env
+config.json
+gateway.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
