@@ -1,0 +1,28 @@
+# systemd unit per il gateway. Copiare in /etc/systemd/system/soltea-gateway.service
+# Poi:  systemctl daemon-reload && systemctl enable --now soltea-gateway
+[Unit]
+Description=Soltea Agent Gateway (orchestrazione Claude Code)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Utente dedicato non privilegiato (creare con: adduser --system --group soltea-gw).
+User=soltea-gw
+Group=soltea-gw
+WorkingDirectory=/opt/soltea-agent-gateway/gateway
+# I segreti stanno in un file d'ambiente non leggibile da altri (chmod 600).
+EnvironmentFile=/etc/soltea-gateway/gateway.env
+# Ambiente Python isolato (uv o venv). Vedi gateway/README.md.
+ExecStart=/opt/soltea-agent-gateway/gateway/.venv/bin/python -m soltea_gateway
+Restart=on-failure
+RestartSec=3
+# Hardening minimo.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=soltea-gateway
+
+[Install]
+WantedBy=multi-user.target
