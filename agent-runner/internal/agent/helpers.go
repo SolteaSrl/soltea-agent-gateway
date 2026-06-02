@@ -24,16 +24,22 @@ func cleanupTicketDir(dir string) {
 	_ = os.RemoveAll(dir)
 }
 
-// buildFirstPrompt compone il prompt del primo turno: istruzioni + dove trovare
-// i file del ticket.
-func buildFirstPrompt(instructions string, ticketID int) string {
+// buildFirstPrompt compone il prompt del primo turno: istruzioni + (se presenti)
+// dove trovare i file del ticket. La riga sui file viene aggiunta solo quando
+// uno zip e' stato effettivamente scaricato e scompattato (hasFiles), altrimenti
+// indicheremmo a claude una cartella .tickets/<id>/ inesistente.
+func buildFirstPrompt(instructions string, ticketID int, hasFiles bool) string {
 	var b strings.Builder
 	if instructions != "" {
 		b.WriteString(instructions)
-		b.WriteString("\n\n")
+		if hasFiles {
+			b.WriteString("\n\n")
+		}
 	}
-	fmt.Fprintf(&b, "I file del ticket #%d sono nella cartella .tickets/%d/ (relativa alla radice del repo). "+
-		"Leggili prima di iniziare.", ticketID, ticketID)
+	if hasFiles {
+		fmt.Fprintf(&b, "I file del ticket #%d sono nella cartella .tickets/%d/ (relativa alla radice del repo). "+
+			"Leggili prima di iniziare.", ticketID, ticketID)
+	}
 	return b.String()
 }
 

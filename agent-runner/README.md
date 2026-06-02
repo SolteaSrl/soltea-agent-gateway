@@ -26,6 +26,7 @@ Copia `config.example.json` in `config.json` (accanto all'exe) e compila:
 | `claude_path` | `claude.exe` (se nel PATH) o percorso assoluto |
 | `use_git_bash` | `true` per lanciare claude via Git-bash |
 | `permission_mode` | `acceptEdits` / `bypassPermissions` / ... |
+| `log_dir` | cartella dei log; vuoto = `logs/` accanto al `config.json` |
 | `projects[]` | `project_id` → `path` della cartella del repo |
 
 ## Installazione come servizio (sulla VM Windows)
@@ -52,6 +53,26 @@ claude -p "<prompt>" --output-format json --permission-mode <mode> [--model <m>]
 ```
 Il primo turno apre la sessione; i turni successivi usano `--resume` con il
 `session_id` restituito da claude, così la chat mantiene il contesto.
+
+## Logging
+Tutto finisce su file nella cartella `log_dir` (così resta anche girando come
+servizio, dove non c'è console):
+
+- `runner.log` — eventi generali (connessione, registrazione, errori di trasporto).
+- `ticket-<id>-<session>.jsonl` — il **transcript completo** della sessione: un
+  evento JSON per riga. `kind` può essere `task.start`, `prompt` (cosa mandiamo a
+  claude), `claude.raw` (stdout **e** stderr grezzi di claude), `result`,
+  `chat.send`, `error`, `task.done`.
+
+Lettura comoda di un transcript:
+```bash
+# tutto leggibile
+cat logs/ticket-69010-*.jsonl | jq .
+# solo i testi della chat
+cat logs/ticket-69010-*.jsonl | jq -r 'select(.kind=="result" or .kind=="prompt") | .text'
+# l'output grezzo di claude quando qualcosa va storto
+cat logs/ticket-69010-*.jsonl | jq -r 'select(.kind=="claude.raw") | .stderr'
+```
 
 > `TODO(live)`: validare quoting/ambiente di `claude.exe` su Windows reale e
 > l'installazione come servizio sulla VM.

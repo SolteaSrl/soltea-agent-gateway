@@ -8,6 +8,7 @@
   "default_model": "",
   "permission_mode": "acceptEdits",
   "heartbeat_seconds": 30,
+  "log_dir": "",
   "projects": [
     { "project_id": 1234, "name": "Sito Cliente X", "path": "C:\\dev\\cliente-x" },
     { "project_id": 1240, "name": "Gestionale Y", "path": "C:\\dev\\gestionale-y" }
