@@ -3,6 +3,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,13 +20,16 @@ type Options struct {
 	PermissionMode string // --permission-mode
 }
 
-// Result e' l'esito di un turno di claude.
+// Result e' l'esito di un turno di claude. RawStdout/Stderr contengono l'output
+// grezzo del CLI, sempre valorizzati (anche in errore) per finire nei log.
 type Result struct {
 	Text       string
 	SessionID  string
 	IsError    bool
 	CostUSD    float64
 	DurationMS int64
+	RawStdout  string
+	Stderr     string
 }
 
 // rawResult mappa i campi che ci servono dall'output `--output-format json`.
@@ -60,18 +64,25 @@ func (r *Runner) Run(ctx context.Context, workdir, prompt, resumeSession string)
 	}
 	cmd.Dir = workdir
 
-	out, err := cmd.Output()
-	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		return nil, fmt.Errorf("claude fallito: %v: %s", err, stderr)
+	// Catturiamo stdout e stderr separatamente: servono entrambi nei log, e
+	// stderr e' l'unico indizio quando claude esce con codice != 0.
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	runErr := cmd.Run()
+	stdout := outBuf.String()
+	stderr := strings.TrimSpace(errBuf.String())
+
+	if runErr != nil {
+		// Result non-nil anche in errore: il chiamante puo' loggare l'output grezzo.
+		return &Result{RawStdout: stdout, Stderr: stderr},
+			fmt.Errorf("claude fallito: %v: %s", runErr, stderr)
 	}
 
 	var raw rawResult
-	if jerr := json.Unmarshal(out, &raw); jerr != nil {
-		return nil, fmt.Errorf("output claude non JSON: %w (primi byte: %.120q)", jerr, string(out))
+	if jerr := json.Unmarshal([]byte(stdout), &raw); jerr != nil {
+		return &Result{RawStdout: stdout, Stderr: stderr},
+			fmt.Errorf("output claude non JSON: %w (primi byte: %.120q)", jerr, stdout)
 	}
 	return &Result{
 		Text:       raw.Result,
@@ -79,6 +90,8 @@ func (r *Runner) Run(ctx context.Context, workdir, prompt, resumeSession string)
 		IsError:    raw.IsError,
 		CostUSD:    raw.TotalCost,
 		DurationMS: raw.DurationMS,
+		RawStdout:  stdout,
+		Stderr:     stderr,
 	}, nil
 }
 

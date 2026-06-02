@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -18,16 +19,19 @@ type Project struct {
 
 // Config e' il contenuto di config.json (vedi DESIGN.md §7).
 type Config struct {
-	GatewayURL       string    `json:"gateway_url"`
-	AgentID          string    `json:"agent_id"`
-	Token            string    `json:"token"`
-	ClaudePath       string    `json:"claude_path"`
-	UseGitBash       bool      `json:"use_git_bash"`
-	GitBashPath      string    `json:"git_bash_path"`
-	DefaultModel     string    `json:"default_model"`
-	PermissionMode   string    `json:"permission_mode"`
-	HeartbeatSeconds int       `json:"heartbeat_seconds"`
-	Projects         []Project `json:"projects"`
+	GatewayURL       string `json:"gateway_url"`
+	AgentID          string `json:"agent_id"`
+	Token            string `json:"token"`
+	ClaudePath       string `json:"claude_path"`
+	UseGitBash       bool   `json:"use_git_bash"`
+	GitBashPath      string `json:"git_bash_path"`
+	DefaultModel     string `json:"default_model"`
+	PermissionMode   string `json:"permission_mode"`
+	HeartbeatSeconds int    `json:"heartbeat_seconds"`
+	// LogDir: cartella dei log del runner. Se vuoto, default = cartella "logs"
+	// accanto al config.json (risolto in Load).
+	LogDir   string    `json:"log_dir"`
+	Projects []Project `json:"projects"`
 }
 
 // Load legge e valida il file di configurazione.
@@ -41,6 +45,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config %q: %w", path, err)
 	}
 	c.applyDefaults()
+	c.resolveLogDir(path)
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -60,6 +65,25 @@ func (c *Config) applyDefaults() {
 	if c.GitBashPath == "" {
 		c.GitBashPath = `C:\Program Files\Git\bin\bash.exe`
 	}
+}
+
+// resolveLogDir rende LogDir un percorso assoluto. Se non specificato, usa la
+// cartella "logs" accanto al config.json (NON la working dir, che per il
+// servizio Windows e' system32).
+func (c *Config) resolveLogDir(configPath string) {
+	dir := c.LogDir
+	if dir == "" {
+		if abs, err := filepath.Abs(configPath); err == nil {
+			dir = filepath.Join(filepath.Dir(abs), "logs")
+		} else {
+			dir = "logs"
+		}
+	} else if !filepath.IsAbs(dir) {
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+	}
+	c.LogDir = dir
 }
 
 func (c *Config) validate() error {
