@@ -146,7 +146,8 @@ async def _handle_hello(
             return None
         conn = Connection(ws, P.ROLE_AGENT, agent_id)
         projects = hello.get("projects", []) or []
-        entry = registry.register(agent_id, conn, projects)
+        runner_version = hello.get("runner_version", "")
+        entry = registry.register(agent_id, conn, projects, runner_version)
         await conn.send(
             {
                 "type": P.WELCOME,
@@ -156,7 +157,10 @@ async def _handle_hello(
                 "heartbeat_seconds": cfg.heartbeat_seconds,
             }
         )
-        log.info("Agente registrato: %s progetti=%s", agent_id, sorted(entry.projects.keys()))
+        log.info(
+            "Agente registrato: %s progetti=%s runner=%s",
+            agent_id, sorted(entry.projects.keys()), entry.runner_version or "?",
+        )
         return conn
 
     if role == P.ROLE_ORCHESTRATOR:

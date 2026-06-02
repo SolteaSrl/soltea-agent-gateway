@@ -26,10 +26,11 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
-def _hello_agent(ws, agent_id="win-dev-01", project_id=1234):
+def _hello_agent(ws, agent_id="win-dev-01", project_id=1234, runner_version="0.4.0"):
     ws.send_json({
         "type": "hello", "role": "agent", "token": "agent-tok", "agent_id": agent_id,
         "projects": [{"project_id": project_id, "name": "Proj X", "path": "C:/dev/x"}],
+        "runner_version": runner_version,
     })
     return ws.receive_json()
 
@@ -120,3 +121,14 @@ def test_task_start_no_agent(client: TestClient):
                         "ticket_id": 1, "instructions": ""})
         err = orch.receive_json()
         assert err["type"] == "error" and err["code"] == "no_agent_for_project"
+
+
+def test_list_agents_reports_runner_version(client: TestClient):
+    with client.websocket_connect("/ws") as agent, client.websocket_connect("/ws") as orch:
+        _hello_agent(agent, runner_version="0.4.0")
+        _hello_orch(orch)
+        orch.send_json({"type": "list_agents", "req_id": "la1"})
+        res = orch.receive_json()
+        assert res["type"] == "agents"
+        assert res["agents"][0]["agent_id"] == "win-dev-01"
+        assert res["agents"][0]["runner_version"] == "0.4.0"

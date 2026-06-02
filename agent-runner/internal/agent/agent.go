@@ -12,6 +12,7 @@ import (
 	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/config"
 	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/protocol"
 	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/runlog"
+	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/version"
 	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/wsclient"
 )
 
@@ -40,6 +41,8 @@ func New(cfg *config.Config) *Agent {
 	} else {
 		log.Printf("log su %s", lg.Dir())
 	}
+	log.Printf("agent-runner v%s", version.Runner)
+	lg.Info("agent-runner v%s avviato", version.Runner)
 	return &Agent{
 		cfg: cfg,
 		lg:  lg,
@@ -83,11 +86,11 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteJSON(protocol.Hello_(a.cfg.AgentID, a.cfg.Token, a.cfg.ProjectsForHello())); err != nil {
+	if err := conn.WriteJSON(protocol.Hello_(a.cfg.AgentID, a.cfg.Token, version.Runner, a.cfg.ProjectsForHello())); err != nil {
 		return err
 	}
-	log.Printf("connesso al gateway %s come %s", a.cfg.GatewayURL, a.cfg.AgentID)
-	a.lg.Info("connesso al gateway %s come %s", a.cfg.GatewayURL, a.cfg.AgentID)
+	log.Printf("connesso al gateway %s come %s (runner v%s)", a.cfg.GatewayURL, a.cfg.AgentID, version.Runner)
+	a.lg.Info("connesso al gateway %s come %s (runner v%s)", a.cfg.GatewayURL, a.cfg.AgentID, version.Runner)
 
 	hbCtx, stopHB := context.WithCancel(ctx)
 	defer stopHB()
@@ -182,7 +185,7 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 	log.Printf("task.start completato sessione=%s is_error=%v costo=%.4f durata_ms=%d", in.SessionID, res.IsError, res.CostUSD, res.DurationMS)
 
 	_ = conn.WriteJSON(protocol.TaskStartedFrame(in.SessionID, in.TicketID, res.SessionID, workdir))
-	_ = conn.WriteJSON(protocol.ChatResultFrame(in.SessionID, res.Text, res.IsError, res.SessionID, res.CostUSD, res.DurationMS))
+	_ = conn.WriteJSON(protocol.ChatResultFrame(in.SessionID, res.Text, res.IsError, res.SessionID, res.CostUSD, res.DurationMS, version.Runner))
 }
 
 func (a *Agent) handleChatSend(ctx context.Context, conn *wsclient.Conn, in protocol.Inbound) {
@@ -213,7 +216,7 @@ func (a *Agent) handleChatSend(ctx context.Context, conn *wsclient.Conn, in prot
 	}
 	st.slog.Log(runlog.Event{Kind: "result", Direction: "out", Text: res.Text, IsError: res.IsError,
 		CostUSD: res.CostUSD, DurationMS: res.DurationMS, ClaudeSession: res.SessionID})
-	_ = conn.WriteJSON(protocol.ChatResultFrame(in.SessionID, res.Text, res.IsError, res.SessionID, res.CostUSD, res.DurationMS))
+	_ = conn.WriteJSON(protocol.ChatResultFrame(in.SessionID, res.Text, res.IsError, res.SessionID, res.CostUSD, res.DurationMS, version.Runner))
 }
 
 func (a *Agent) handleTaskDone(in protocol.Inbound) {

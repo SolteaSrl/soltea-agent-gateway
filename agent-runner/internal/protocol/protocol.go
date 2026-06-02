@@ -35,10 +35,10 @@ type Inbound struct {
 
 // --- costruttori dei frame in uscita (verso il gateway) ---
 
-func Hello_(agentID, token string, projects []map[string]any) map[string]any {
+func Hello_(agentID, token, runnerVersion string, projects []map[string]any) map[string]any {
 	return map[string]any{
 		"type": Hello, "role": RoleAgent, "agent_id": agentID,
-		"token": token, "projects": projects,
+		"token": token, "projects": projects, "runner_version": runnerVersion,
 	}
 }
 
@@ -52,10 +52,11 @@ func TaskStartedFrame(sessionID string, ticketID int, claudeSessionID, workdir s
 	}
 }
 
-func ChatResultFrame(sessionID, text string, isError bool, claudeSessionID string, costUSD float64, durationMS int64) map[string]any {
+func ChatResultFrame(sessionID, text string, isError bool, claudeSessionID string, costUSD float64, durationMS int64, runnerVersion string) map[string]any {
 	return map[string]any{
 		"type": ChatResult, "session_id": sessionID, "text": text, "is_error": isError,
 		"claude_session_id": claudeSessionID, "cost_usd": costUSD, "duration_ms": durationMS,
+		"runner_version": runnerVersion,
 	}
 }
 
