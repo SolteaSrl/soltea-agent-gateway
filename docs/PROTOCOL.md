@@ -11,13 +11,15 @@ Ogni frame ha un campo `type`. I campi non pertinenti sono omessi.
 ### `hello` (client → gateway), primo frame obbligatorio
 ```json
 { "type": "hello", "role": "agent", "token": "...", "agent_id": "win-dev-01",
+  "runner_version": "0.4.0",
   "projects": [ { "project_id": 1234, "name": "Sito X", "path": "C:\\dev\\x" } ] }
 ```
 ```json
 { "type": "hello", "role": "orchestrator", "token": "...", "client_id": "claudia" }
 ```
 - `role`: `"agent"` | `"orchestrator"`.
-- Per `agent`: `projects[]` con `project_id` (int) e opzionali `name`, `path`.
+- Per `agent`: `projects[]` con `project_id` (int) e opzionali `name`, `path`; `runner_version`
+  (string) dichiara la versione del runner (mostrata in `list_agents` per capire chi è da aggiornare).
 - Auth: `token` confrontato con i token noti al gateway. Token invalido → `error` + chiusura.
 
 ### `welcome` (gateway → client), risposta a `hello`
@@ -54,7 +56,8 @@ Se nessun agente presidia il progetto: `agent_id: null, online: false`.
 ```
 ```json
 { "type": "agents", "req_id": "r2", "agents": [
-  { "agent_id": "win-dev-01", "online": true, "projects": [1234, 1240] } ] }
+  { "agent_id": "win-dev-01", "online": true, "projects": [1234, 1240],
+    "runner_version": "0.4.0" } ] }
 ```
 
 ## 4. Ciclo di lavoro su un ticket
@@ -87,7 +90,8 @@ non è presidiato/online → `error`.
 ### `chat.result` (agente → … → orchestratrice) — fine di un turno
 ```json
 { "type": "chat.result", "session_id": "sess-abc", "text": "Fatto. Ho aggiunto try/except e un test.",
-  "is_error": false, "claude_session_id": "77c17ef9-...", "cost_usd": 0.10, "duration_ms": 24025 }
+  "is_error": false, "claude_session_id": "77c17ef9-...", "cost_usd": 0.10, "duration_ms": 24025,
+  "runner_version": "0.4.0" }
 ```
 
 ### `task.done` (orchestratrice → gateway → agente)

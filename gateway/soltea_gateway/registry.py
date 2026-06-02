@@ -16,6 +16,7 @@ class AgentEntry:
     agent_id: str
     conn: Connection
     projects: dict[int, str] = field(default_factory=dict)  # project_id -> nome
+    runner_version: str = ""  # versione dichiarata dal runner nel frame hello
 
 
 class Registry:
@@ -23,7 +24,9 @@ class Registry:
         self._agents: dict[str, AgentEntry] = {}
         self._project_index: dict[int, str] = {}  # project_id -> agent_id
 
-    def register(self, agent_id: str, conn: Connection, projects: list[dict]) -> AgentEntry:
+    def register(
+        self, agent_id: str, conn: Connection, projects: list[dict], runner_version: str = ""
+    ) -> AgentEntry:
         """Registra (o ri-registra) un agente e i suoi progetti.
 
         Se l'agent_id era gia' presente (riconnessione), rimpiazza la entry e
@@ -35,7 +38,9 @@ class Registry:
             pid = int(p["project_id"])
             proj_map[pid] = str(p.get("name", ""))
             self._project_index[pid] = agent_id
-        entry = AgentEntry(agent_id=agent_id, conn=conn, projects=proj_map)
+        entry = AgentEntry(
+            agent_id=agent_id, conn=conn, projects=proj_map, runner_version=str(runner_version or "")
+        )
         self._agents[agent_id] = entry
         return entry
 
@@ -71,6 +76,7 @@ class Registry:
                 "agent_id": e.agent_id,
                 "online": True,
                 "projects": sorted(e.projects.keys()),
+                "runner_version": e.runner_version,
             }
             for e in self._agents.values()
         ]
