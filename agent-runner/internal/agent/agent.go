@@ -153,14 +153,15 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 
 	// Scarica e scompatta lo zip del ticket in <repo>/.tickets/<id>/.
 	workdir := ticketDir(projPath, in.TicketID)
-	if in.BlobID != "" {
+	hasFiles := in.BlobID != ""
+	if hasFiles {
 		if err := a.fetchTicketZip(in.BlobID, workdir); err != nil {
 			a.failSession(conn, slog, in.SessionID, "blob_not_found", err.Error())
 			return
 		}
 	}
 
-	prompt := buildFirstPrompt(in.Instructions, in.TicketID)
+	prompt := buildFirstPrompt(in.Instructions, in.TicketID, hasFiles)
 	slog.Log(runlog.Event{Kind: "prompt", Direction: "out", Text: prompt})
 	res, err := a.runner.Run(ctx, projPath, prompt, "")
 	a.logClaudeRaw(slog, res)
