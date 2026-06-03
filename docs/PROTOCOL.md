@@ -119,6 +119,21 @@ Codici: `unauthorized`, `bad_hello`, `no_agent_for_project`, `project_not_declar
 
 I blob hanno id `uuid4`, un TTL e vengono rimossi dopo `task.done`.
 
+## 6b. Provisioning agenti (HTTP, non WS)
+
+Permette all'orchestratrice di creare nuovi agenti senza editare `GW_AGENT_TOKENS`
+a mano e riavviare. I token creati qui sono persistiti su file (`GW_AGENT_TOKENS_FILE`)
+e sopravvivono al restart; quelli statici da env restano gestiti via env.
+
+- `POST /provision` — header `Authorization: Bearer <orch_token>`, body JSON
+  `{ "agent_id": "runner-...", "rotate": false }`. `agent_id` opzionale (se assente
+  ne genera uno tipo `runner-<hex>`). Risposta: `{ "agent_id": "...", "token": "...",
+  "rotated": false }`. Il **token è mostrato una sola volta**. 409 se l'id esiste già
+  (senza `rotate`) o se è definito staticamente in `GW_AGENT_TOKENS`.
+- `POST /revoke` — header `Authorization: Bearer <orch_token>`, body
+  `{ "agent_id": "runner-..." }`. Risposta: `{ "agent_id": "...", "revoked": true|false }`.
+  409 sugli id statici da env.
+
 ## 7. Note di instradamento
 
 - Una **sessione** lega esattamente un orchestratore e un agente. I frame `chat.*`

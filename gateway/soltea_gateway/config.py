@@ -37,6 +37,8 @@ class Config:
     agent_tokens: dict[str, str] = field(default_factory=dict)
     # Se True, accetta qualsiasi agent_id con un unico token condiviso (solo dev).
     shared_agent_token: str = ""
+    # File JSON dove persistere i token creati a runtime via /provision.
+    agent_tokens_file: Path = Path("/var/lib/soltea-gateway/agent_tokens.json")
     # Directory per i blob (zip dei ticket).
     blob_dir: Path = Path("/var/lib/soltea-gateway/blobs")
     # TTL dei blob in secondi (GC pigro).
@@ -54,6 +56,9 @@ class Config:
             orchestrator_token=e.get("GW_ORCH_TOKEN", ""),
             agent_tokens=_split_tokens(e.get("GW_AGENT_TOKENS", "")),
             shared_agent_token=e.get("GW_SHARED_AGENT_TOKEN", ""),
+            agent_tokens_file=Path(
+                e.get("GW_AGENT_TOKENS_FILE", "/var/lib/soltea-gateway/agent_tokens.json")
+            ),
             blob_dir=Path(e.get("GW_BLOB_DIR", "/var/lib/soltea-gateway/blobs")),
             blob_ttl_seconds=int(e.get("GW_BLOB_TTL_SECONDS", str(24 * 3600))),
             blob_max_bytes=int(e.get("GW_BLOB_MAX_BYTES", str(200 * 1024 * 1024))),
