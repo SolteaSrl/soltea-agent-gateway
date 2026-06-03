@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 from typing import Any
 
 from fastapi import FastAPI, Header, Request, Response, WebSocket, WebSocketDisconnect
@@ -20,6 +21,7 @@ from .config import Config
 from .connection import Connection
 from .hub import Hub
 from .registry import Registry
+from .tokenstore import AgentTokenStore
 
 log = logging.getLogger("soltea_gateway")
 
@@ -38,6 +40,14 @@ def create_app(config: Config | None = None) -> FastAPI:
     registry = Registry()
     hub = Hub(registry)
     blobs = BlobStore(cfg.blob_dir, cfg.blob_ttl_seconds)
+
+    # Token statici (da env) vs token creati a runtime (persistiti su file).
+    # Gli id definiti via env sono "di sistema": non si provisionano/revocano via API.
+    env_agent_ids = set(cfg.agent_tokens)
+    token_store = AgentTokenStore(cfg.agent_tokens_file)
+    for aid, tok in token_store.tokens().items():
+        if aid not in env_agent_ids:  # l'env vince sui conflitti
+            cfg.agent_tokens[aid] = tok
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -68,6 +78,67 @@ def create_app(config: Config | None = None) -> FastAPI:
         if not cfg.check_orchestrator_token(_bearer(authorization)):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return JSONResponse({"agents": registry.snapshot()})
+
+    @app.post("/provision")
+    async def provision_agent(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        """Crea (o ruota) la coppia agent_id/token. Solo orchestratrice.
+
+        Body JSON: {"agent_id": "runner-...", "rotate": false}.
+        Se agent_id manca, ne genera uno. Il token e' restituito UNA volta sola.
+        """
+        if not cfg.check_orchestrator_token(_bearer(authorization)):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json() if await request.body() else {}
+        except ValueError:
+            return JSONResponse({"error": "bad_json"}, status_code=400)
+        agent_id = (body.get("agent_id") or "").strip() or f"runner-{secrets.token_hex(4)}"
+        rotate = bool(body.get("rotate", False))
+        if agent_id in env_agent_ids:
+            return JSONResponse(
+                {"error": "managed_by_env", "agent_id": agent_id,
+                 "message": "agent_id definito staticamente in GW_AGENT_TOKENS; gestiscilo lì."},
+                status_code=409,
+            )
+        if token_store.has(agent_id) and not rotate:
+            return JSONResponse(
+                {"error": "already_exists", "agent_id": agent_id,
+                 "message": "agent_id già provisionato; usa rotate=true per rigenerare il token."},
+                status_code=409,
+            )
+        token = token_store.provision(agent_id, rotate=True)
+        cfg.agent_tokens[agent_id] = token
+        log.info("Provision agente: %s (rotate=%s)", agent_id, rotate)
+        return JSONResponse({"agent_id": agent_id, "token": token, "rotated": rotate})
+
+    @app.post("/revoke")
+    async def revoke_agent(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        """Revoca un agent_id provisionato a runtime. Solo orchestratrice."""
+        if not cfg.check_orchestrator_token(_bearer(authorization)):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json() if await request.body() else {}
+        except ValueError:
+            return JSONResponse({"error": "bad_json"}, status_code=400)
+        agent_id = (body.get("agent_id") or "").strip()
+        if not agent_id:
+            return JSONResponse({"error": "missing_agent_id"}, status_code=400)
+        if agent_id in env_agent_ids:
+            return JSONResponse(
+                {"error": "managed_by_env", "agent_id": agent_id,
+                 "message": "agent_id definito staticamente in GW_AGENT_TOKENS; gestiscilo lì."},
+                status_code=409,
+            )
+        removed = token_store.revoke(agent_id)
+        cfg.agent_tokens.pop(agent_id, None)
+        log.info("Revoke agente: %s (esisteva=%s)", agent_id, removed)
+        return JSONResponse({"agent_id": agent_id, "revoked": removed})
 
     @app.post("/blobs")
     async def upload_blob(
