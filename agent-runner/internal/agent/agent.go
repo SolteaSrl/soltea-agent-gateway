@@ -147,6 +147,7 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 	slog := a.lg.Session(in.SessionID, in.TicketID)
 	slog.Log(runlog.Event{Kind: "task.start", Direction: "in", Text: in.Instructions})
 	log.Printf("task.start sessione=%s ticket=%d progetto=%d", in.SessionID, in.TicketID, in.ProjectID)
+	a.lg.Info("sessione aperta: sessione=%s ticket=%d progetto=%d", in.SessionID, in.TicketID, in.ProjectID)
 
 	projPath, ok := a.cfg.ProjectPath(in.ProjectID)
 	if !ok {
@@ -183,6 +184,7 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 	slog.Log(runlog.Event{Kind: "result", Direction: "out", Text: res.Text, IsError: res.IsError,
 		CostUSD: res.CostUSD, DurationMS: res.DurationMS, ClaudeSession: res.SessionID})
 	log.Printf("task.start completato sessione=%s is_error=%v costo=%.4f durata_ms=%d", in.SessionID, res.IsError, res.CostUSD, res.DurationMS)
+	a.lg.Info("task.start completato: sessione=%s is_error=%v costo=%.4f durata_ms=%d", in.SessionID, res.IsError, res.CostUSD, res.DurationMS)
 
 	_ = conn.WriteJSON(protocol.TaskStartedFrame(in.SessionID, in.TicketID, res.SessionID, workdir))
 	_ = conn.WriteJSON(protocol.ChatResultFrame(in.SessionID, res.Text, res.IsError, res.SessionID, res.CostUSD, res.DurationMS, version.Runner))
@@ -227,6 +229,7 @@ func (a *Agent) handleTaskDone(in protocol.Inbound) {
 	if st != nil {
 		st.slog.Log(runlog.Event{Kind: "task.done", Direction: "in"})
 		log.Printf("task.done sessione=%s", in.SessionID)
+		a.lg.Info("sessione chiusa: sessione=%s ticket=%d progetto=%d", in.SessionID, st.ticketID, st.projectID)
 		cleanupTicketDir(st.workdir)
 	}
 }
@@ -243,5 +246,6 @@ func (a *Agent) logClaudeRaw(slog *runlog.Session, res *claude.Result) {
 func (a *Agent) failSession(conn *wsclient.Conn, slog *runlog.Session, sessionID, code, msg string) {
 	slog.Log(runlog.Event{Kind: "error", Direction: "out", Code: code, Text: msg, IsError: true})
 	log.Printf("errore sessione=%s [%s]: %s", sessionID, code, msg)
+	a.lg.Info("sessione chiusa con errore: sessione=%s [%s]: %s", sessionID, code, msg)
 	_ = conn.WriteJSON(protocol.ErrorFrame(sessionID, code, msg))
 }
