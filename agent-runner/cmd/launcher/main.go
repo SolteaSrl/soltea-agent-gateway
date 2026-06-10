@@ -40,6 +40,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -99,6 +100,15 @@ func (p *program) Stop(s service.Service) error {
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[launcher] ")
+
+	// Dirotta il log standard SIA su stderr SIA su <exeDir>/launcher.log:
+	// se il launcher gira come servizio Windows non c'e' una console che
+	// vede stderr, quindi senza questo redirect i log del launcher
+	// (poll/scarica/canary/rollback) andrebbero persi. Nil-safe: se il file
+	// non e' apribile (permessi/RO) si resta a stderr.
+	if w := openLauncherLog(); w != nil {
+		log.SetOutput(io.MultiWriter(os.Stderr, w))
+	}
 
 	defaultWorker := filepath.Join(exeDir(), workerExeName())
 	worker := flag.String("worker", defaultWorker, "percorso del binario worker")
@@ -470,6 +480,18 @@ func exeDir() string {
 		return "."
 	}
 	return filepath.Dir(exe)
+}
+
+// openLauncherLog apre (in append) il file launcher.log accanto al binario
+// del launcher. Ritorna nil se l'apertura fallisce: il caller usa stderr solo.
+func openLauncherLog() *os.File {
+	path := filepath.Join(exeDir(), "launcher.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[launcher] avviso: launcher.log non apribile (%v); log solo in console\n", err)
+		return nil
+	}
+	return f
 }
 
 func workerExeName() string {

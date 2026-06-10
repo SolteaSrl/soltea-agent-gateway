@@ -16,6 +16,7 @@ package runlog
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,36 @@ func (l *Logger) Close() {
 		_ = l.general.Close()
 		l.general = nil
 	}
+}
+
+// Writer ritorna l'`*os.File` del log generale come io.Writer, per essere
+// usato con `log.SetOutput(io.MultiWriter(os.Stderr, lg.Writer()))`: cosi'
+// TUTTI i log.Printf standard del runner finiscono ANCHE in runner.log,
+// non solo le righe esplicite passate per Info(). Ritorna nil se il logger
+// e' nil o non ha un file aperto -- il chiamante deve controllarlo per non
+// passare nil al MultiWriter.
+func (l *Logger) Writer() io.Writer {
+	if l == nil || l.general == nil {
+		return nil
+	}
+	return &lockedWriter{l: l}
+}
+
+// lockedWriter serializza le Write sul file generale con lo stesso mutex usato
+// da Info(): cosi' MultiWriter(stderr, file) non corrompe il transcript se due
+// goroutine loggano insieme.
+type lockedWriter struct{ l *Logger }
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	if w.l == nil {
+		return len(p), nil
+	}
+	w.l.mu.Lock()
+	defer w.l.mu.Unlock()
+	if w.l.general == nil {
+		return len(p), nil
+	}
+	return w.l.general.Write(p)
 }
 
 // Info appende una riga al log generale (oltre a quanto gia' va su stdout).
