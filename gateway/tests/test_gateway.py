@@ -220,3 +220,81 @@ def test_list_agents_reports_runner_version(client: TestClient):
         assert res["type"] == "agents"
         assert res["agents"][0]["agent_id"] == "win-dev-01"
         assert res["agents"][0]["runner_version"] == "0.4.0"
+
+
+def test_welcome_advertises_protocol_version(client: TestClient):
+    """Sia agente sia orchestratrice ricevono la versione di protocollo del gateway."""
+    from soltea_gateway.protocol import PROTOCOL_VERSION
+
+    with client.websocket_connect("/ws") as agent:
+        wa = _hello_agent(agent)
+        assert wa["protocol_version"] == PROTOCOL_VERSION
+
+    with client.websocket_connect("/ws") as orch:
+        wo = _hello_orch(orch)
+        assert wo["protocol_version"] == PROTOCOL_VERSION
+
+
+def test_hello_without_protocol_version_is_accepted_for_backcompat(client: TestClient):
+    """Runner v0.4.x non mandano protocol_version: il gateway deve accettarli."""
+    with client.websocket_connect("/ws") as ws:
+        # _hello_agent dichiara runner_version ma NON protocol_version.
+        wa = _hello_agent(ws)
+        assert wa["type"] == "welcome"
+
+
+def test_runner_with_incompatible_protocol_is_rejected(client: TestClient):
+    """Un runner che dichiara protocol_version=0 va rifiutato con codice chiaro."""
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({
+            "type": "hello", "role": "agent", "token": "agent-tok", "agent_id": "win-dev-01",
+            "projects": [], "runner_version": "0.0.0", "protocol_version": 0,
+        })
+        frame = ws.receive_json()
+        assert frame["type"] == "error"
+        assert frame["code"] == "protocol_incompatible"
+        assert frame["gateway_protocol_version"] >= 1
+
+
+def test_hello_with_garbage_protocol_version_is_rejected(client: TestClient):
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({
+            "type": "hello", "role": "agent", "token": "agent-tok", "agent_id": "x",
+            "projects": [], "protocol_version": "non-un-numero",
+        })
+        frame = ws.receive_json()
+        assert frame["type"] == "error"
+        assert frame["code"] == "bad_hello"
+
+
+def test_session_opened_includes_runner_version(client: TestClient):
+    """All'apertura di sessione, l'orch riceve la versione del runner senza dover
+    incrociare list_agents (diagnostica + rate-limit dei round-trip)."""
+    with client.websocket_connect("/ws") as agent, client.websocket_connect("/ws") as orch:
+        _hello_agent(agent, runner_version="0.5.0-rc1")
+        _hello_orch(orch)
+        orch.send_json({"type": "task.start", "req_id": "t1", "project_id": 1234,
+                        "ticket_id": 7777, "instructions": "..."})
+        agent.receive_json()  # il task instradato al runner
+        so = orch.receive_json()
+        assert so["type"] == "session_opened"
+        assert so["runner_version"] == "0.5.0-rc1"
+
+
+def test_session_opened_runner_version_absent_when_unknown(client: TestClient):
+    """Runner che non dichiara la versione -> session_opened ha runner_version=None
+    (non stringa vuota: il client distingue "non lo so" da "stringa vuota inviata")."""
+    with client.websocket_connect("/ws") as agent, client.websocket_connect("/ws") as orch:
+        # hello esplicito SENZA runner_version
+        agent.send_json({
+            "type": "hello", "role": "agent", "token": "agent-tok", "agent_id": "win-dev-01",
+            "projects": [{"project_id": 1234, "name": "Proj X", "path": "C:/dev/x"}],
+        })
+        assert agent.receive_json()["type"] == "welcome"
+        _hello_orch(orch)
+        orch.send_json({"type": "task.start", "req_id": "t1", "project_id": 1234,
+                        "ticket_id": 7777, "instructions": "..."})
+        agent.receive_json()
+        so = orch.receive_json()
+        assert so["type"] == "session_opened"
+        assert so["runner_version"] is None
