@@ -110,6 +110,89 @@ func TestSplitArgs_BasicSpaceSeparated(t *testing.T) {
 	}
 }
 
+func TestCurrentWorkerVersion_ReadsCacheFile(t *testing.T) {
+	tmp := t.TempDir()
+	worker := filepath.Join(tmp, "agent-runner")
+	if err := os.WriteFile(worker, []byte("anything"), 0o755); err != nil {
+		t.Fatalf("write worker: %v", err)
+	}
+	if err := os.WriteFile(worker+".version", []byte("0.6.0\n"), 0o644); err != nil {
+		t.Fatalf("write .version: %v", err)
+	}
+	if v := currentWorkerVersion(worker); v != "0.6.0" {
+		t.Errorf("currentWorkerVersion=%q want=0.6.0", v)
+	}
+}
+
+func TestCurrentWorkerVersion_FallsBackToExecAndCaches(t *testing.T) {
+	tmp := t.TempDir()
+	worker := filepath.Join(tmp, "fake-worker.sh")
+	// Fake worker che stampa una versione fissa quando invocato con -print-version.
+	script := "#!/bin/sh\ncase \"$1\" in -print-version) echo 0.7.0 ;; *) echo other ;; esac\n"
+	if err := os.WriteFile(worker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake worker: %v", err)
+	}
+	v := currentWorkerVersion(worker)
+	if v != "0.7.0" {
+		t.Errorf("currentWorkerVersion=%q want=0.7.0", v)
+	}
+	// La cache deve essere stata scritta.
+	data, err := os.ReadFile(worker + ".version")
+	if err != nil {
+		t.Fatalf("cache .version non scritta: %v", err)
+	}
+	if string(bytesTrim(data)) != "0.7.0" {
+		t.Errorf(".version cache=%q want=0.7.0", data)
+	}
+}
+
+func TestCurrentWorkerVersion_ExecFailureReturnsEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	worker := filepath.Join(tmp, "nonexistent")
+	if v := currentWorkerVersion(worker); v != "" {
+		t.Errorf("currentWorkerVersion(nonexistent)=%q want=empty", v)
+	}
+	if _, err := os.Stat(worker + ".version"); !os.IsNotExist(err) {
+		t.Errorf("cache scritta nonostante exec failure")
+	}
+}
+
+func TestApplyPendingIfAny_UpdatesVersionCache(t *testing.T) {
+	tmp := t.TempDir()
+	worker := filepath.Join(tmp, "agent-runner")
+	_ = os.WriteFile(worker, []byte("OLD"), 0o755)
+	_ = os.WriteFile(worker+".new", []byte("NEW"), 0o755)
+	mk := `{"version":"0.6.1","sha256":"deadbeef","ts":"2026-06-10T00:00:00Z"}`
+	_ = os.WriteFile(worker+".update-pending", []byte(mk), 0o644)
+	// Stato pre-apply: cache "vecchia" 0.6.0.
+	_ = os.WriteFile(worker+".version", []byte("0.6.0\n"), 0o644)
+
+	applyPendingIfAny(worker)
+
+	data, err := os.ReadFile(worker + ".version")
+	if err != nil {
+		t.Fatalf("cache .version mancante: %v", err)
+	}
+	if got := string(bytesTrim(data)); got != "0.6.1" {
+		t.Errorf("cache .version=%q want=0.6.1 (deve essere aggiornata dopo apply)", got)
+	}
+}
+
+func TestWriteAtomic_TmpRenameSucceeds(t *testing.T) {
+	tmp := t.TempDir()
+	dst := filepath.Join(tmp, "out.txt")
+	if err := writeAtomic(dst, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("writeAtomic: %v", err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "hello" {
+		t.Errorf("contenuto=%q", b)
+	}
+	// Nessun .tmp residuo.
+	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf(".tmp residuo: %v", err)
+	}
+}
+
 func TestBytesTrim_StripsWhitespaceBothEnds(t *testing.T) {
 	cases := map[string]string{
 		"  abc  ":     "abc",
