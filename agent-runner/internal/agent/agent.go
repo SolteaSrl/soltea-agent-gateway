@@ -52,8 +52,7 @@ func New(cfg *config.Config) *Agent {
 			log.SetOutput(io.MultiWriter(os.Stderr, w))
 		}
 	}
-	log.Printf("agent-runner v%s", version.Runner)
-	lg.Info("agent-runner v%s avviato", version.Runner)
+	log.Printf("agent-runner v%s avviato", version.Runner)
 	return &Agent{
 		cfg: cfg,
 		lg:  lg,
@@ -101,7 +100,6 @@ func (a *Agent) connectAndServe(ctx context.Context) error {
 		return err
 	}
 	log.Printf("connesso al gateway %s come %s (runner v%s)", a.cfg.GatewayURL, a.cfg.AgentID, version.Runner)
-	a.lg.Info("connesso al gateway %s come %s (runner v%s)", a.cfg.GatewayURL, a.cfg.AgentID, version.Runner)
 
 	hbCtx, stopHB := context.WithCancel(ctx)
 	defer stopHB()
@@ -135,7 +133,6 @@ func (a *Agent) dispatch(ctx context.Context, conn *wsclient.Conn, in protocol.I
 	switch in.Type {
 	case protocol.Welcome:
 		log.Printf("registrato sul gateway")
-		a.lg.Info("registrato sul gateway")
 	case protocol.Ping:
 		_ = conn.WriteJSON(protocol.PongFrame(in.TS))
 	case protocol.Pong:
@@ -148,7 +145,6 @@ func (a *Agent) dispatch(ctx context.Context, conn *wsclient.Conn, in protocol.I
 		a.handleTaskDone(in)
 	case protocol.Error:
 		log.Printf("errore dal gateway [%s]: %s", in.Code, in.Message)
-		a.lg.Info("errore dal gateway [%s]: %s", in.Code, in.Message)
 	default:
 		log.Printf("frame ignoto: %s", in.Type)
 	}
@@ -156,7 +152,6 @@ func (a *Agent) dispatch(ctx context.Context, conn *wsclient.Conn, in protocol.I
 
 func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in protocol.Inbound) {
 	log.Printf("task.start sessione=%s ticket=%d progetto=%d", in.SessionID, in.TicketID, in.ProjectID)
-	a.lg.Info("sessione aperta: sessione=%s ticket=%d progetto=%d", in.SessionID, in.TicketID, in.ProjectID)
 
 	projPath, ok := a.cfg.ProjectPath(in.ProjectID)
 	if !ok {
@@ -223,7 +218,6 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 	slog.Log(runlog.Event{Kind: "result", Direction: "out", Text: res.Text, IsError: res.IsError,
 		CostUSD: res.CostUSD, DurationMS: res.DurationMS, ClaudeSession: res.SessionID})
 	log.Printf("task.start completato sessione=%s is_error=%v costo=%.4f durata_ms=%d", in.SessionID, res.IsError, res.CostUSD, res.DurationMS)
-	a.lg.Info("task.start completato: sessione=%s is_error=%v costo=%.4f durata_ms=%d", in.SessionID, res.IsError, res.CostUSD, res.DurationMS)
 
 	_ = conn.WriteJSON(protocol.TaskStartedFrame(in.SessionID, in.TicketID, res.SessionID, workdir))
 	_ = conn.WriteJSON(protocol.ChatResultFrame(in.SessionID, res.Text, res.IsError, res.SessionID, res.CostUSD, res.DurationMS, version.Runner))
@@ -277,8 +271,7 @@ func (a *Agent) handleTaskDone(in protocol.Inbound) {
 	a.mu.Unlock()
 	if st != nil {
 		st.slog.Log(runlog.Event{Kind: "task.done", Direction: "in"})
-		log.Printf("task.done sessione=%s", in.SessionID)
-		a.lg.Info("sessione chiusa: sessione=%s ticket=%d progetto=%d", in.SessionID, st.ticketID, st.projectID)
+		log.Printf("task.done sessione=%s ticket=%d progetto=%d", in.SessionID, st.ticketID, st.projectID)
 		// Pulisce solo lo scratch work/<sid>/. Transcript, stream, prompt e
 		// attachments restano in .agent-runner/ per ispezione post-mortem.
 		cleanupSessionWorkdir(st.workdir)
@@ -317,6 +310,5 @@ func (a *Agent) makeDeltaCallback(conn *wsclient.Conn, sessionID string, st *ses
 func (a *Agent) failSession(conn *wsclient.Conn, slog *runlog.Session, sessionID, code, msg string) {
 	slog.Log(runlog.Event{Kind: "error", Direction: "out", Code: code, Text: msg, IsError: true})
 	log.Printf("errore sessione=%s [%s]: %s", sessionID, code, msg)
-	a.lg.Info("sessione chiusa con errore: sessione=%s [%s]: %s", sessionID, code, msg)
 	_ = conn.WriteJSON(protocol.ErrorFrame(sessionID, code, msg))
 }
