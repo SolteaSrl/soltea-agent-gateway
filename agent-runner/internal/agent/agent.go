@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -42,6 +43,14 @@ func New(cfg *config.Config) *Agent {
 		log.Printf("logging disabilitato (%v)", err)
 	} else {
 		log.Printf("log su %s", lg.Dir())
+		// Mirroring del log standard di Go su runner.log: TUTTI i log.Printf
+		// finiscono sia in stderr (console / SCM stdout-log) sia nel file
+		// generale. Senza questa redirezione, runner.log conteneva solo le
+		// righe scritte esplicitamente con lg.Info() -- la console aveva
+		// molto piu' contesto.
+		if w := lg.Writer(); w != nil {
+			log.SetOutput(io.MultiWriter(os.Stderr, w))
+		}
 	}
 	log.Printf("agent-runner v%s", version.Runner)
 	lg.Info("agent-runner v%s avviato", version.Runner)

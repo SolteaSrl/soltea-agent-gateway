@@ -3,6 +3,7 @@ package runlog
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,5 +75,77 @@ func TestNilSafe(t *testing.T) {
 	s.Log(Event{Kind: "result"})
 	if s.File() != "" {
 		t.Fatalf("File() su sessione senza logger dovrebbe essere vuoto")
+	}
+	// Writer() su nil-logger NON deve panicare e deve essere nil.
+	if w := lg.Writer(); w != nil {
+		t.Errorf("Writer() su nil logger=%v want=nil", w)
+	}
+}
+
+func TestWriter_MirrorsToGeneralFile(t *testing.T) {
+	dir := t.TempDir()
+	lg, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer lg.Close()
+
+	w := lg.Writer()
+	if w == nil {
+		t.Fatal("Writer() ritorna nil su logger valido")
+	}
+	for _, line := range []string{"riga 1\n", "riga 2\n", "riga 3 con dati\n"} {
+		n, err := w.Write([]byte(line))
+		if err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if n != len(line) {
+			t.Errorf("Write n=%d want=%d", n, len(line))
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "runner.log"))
+	if err != nil {
+		t.Fatalf("read runner.log: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{"riga 1", "riga 2", "riga 3 con dati"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("runner.log non contiene %q: %q", want, body)
+		}
+	}
+}
+
+func TestWriter_IsConcurrencySafe(t *testing.T) {
+	dir := t.TempDir()
+	lg, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer lg.Close()
+
+	w := lg.Writer()
+	if w == nil {
+		t.Fatal("Writer() nil")
+	}
+	// 50 goroutine scrivono insieme: niente race, niente panic. Non controlliamo
+	// l'ordine (e' best-effort) ma il file deve contenere tutte le firme.
+	done := make(chan struct{})
+	for i := 0; i < 50; i++ {
+		i := i
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_, _ = w.Write([]byte(fmt.Sprintf("worker-%02d\n", i)))
+		}()
+	}
+	for i := 0; i < 50; i++ {
+		<-done
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "runner.log"))
+	body := string(data)
+	for i := 0; i < 50; i++ {
+		want := fmt.Sprintf("worker-%02d", i)
+		if !strings.Contains(body, want) {
+			t.Errorf("manca %q nel file", want)
+		}
 	}
 }
