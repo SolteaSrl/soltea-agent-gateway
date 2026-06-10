@@ -156,11 +156,13 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 		return
 	}
 
-	// Scarica e scompatta lo zip del ticket in <repo>/.tickets/<id>/.
+	// Scarica e scompatta lo zip allegato in <repo>/.tickets/<id>/attachments/.
+	// La sotto-cartella separa l'input (allegati) da eventuali artefatti scritti
+	// durante il task e rende chiaro nel prompt cosa "leggere".
 	workdir := ticketDir(projPath, in.TicketID)
 	hasFiles := in.BlobID != ""
 	if hasFiles {
-		if err := a.fetchTicketZip(in.BlobID, workdir); err != nil {
+		if err := a.fetchTicketZip(in.BlobID, attachmentsDir(workdir)); err != nil {
 			a.failSession(conn, slog, in.SessionID, "blob_not_found", err.Error())
 			return
 		}
