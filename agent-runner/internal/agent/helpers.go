@@ -12,9 +12,21 @@ import (
 	"time"
 )
 
-// ticketDir e' la cartella dove scompattiamo i file del ticket, dentro il repo.
+// ticketDir e' la radice della cartella di sessione del ticket, dentro il repo.
+// La struttura ora e':
+//
+//	<repo>/.tickets/<id>/                  <- radice sessione (workdir scratch del task)
+//	<repo>/.tickets/<id>/attachments/      <- file allegati dall'orchestratrice
+//
+// La sotto-cartella `attachments/` separa cio' che il task scarica (dato di input)
+// da eventuali artefatti che claude scrive durante il lavoro, evitando conflitti
+// di path e rendendo chiaro nel prompt "leggi qui i file allegati".
 func ticketDir(projectPath string, ticketID int) string {
 	return filepath.Join(projectPath, ".tickets", strconv.Itoa(ticketID))
+}
+
+func attachmentsDir(ticketDir string) string {
+	return filepath.Join(ticketDir, "attachments")
 }
 
 func cleanupTicketDir(dir string) {
@@ -25,9 +37,9 @@ func cleanupTicketDir(dir string) {
 }
 
 // buildFirstPrompt compone il prompt del primo turno: istruzioni + (se presenti)
-// dove trovare i file del ticket. La riga sui file viene aggiunta solo quando
-// uno zip e' stato effettivamente scaricato e scompattato (hasFiles), altrimenti
-// indicheremmo a claude una cartella .tickets/<id>/ inesistente.
+// dove trovare i file allegati al ticket. La riga sugli allegati viene aggiunta
+// solo quando uno zip e' stato effettivamente scaricato e scompattato (hasFiles),
+// altrimenti indicheremmo a claude una cartella inesistente.
 func buildFirstPrompt(instructions string, ticketID int, hasFiles bool) string {
 	var b strings.Builder
 	if instructions != "" {
@@ -37,7 +49,8 @@ func buildFirstPrompt(instructions string, ticketID int, hasFiles bool) string {
 		}
 	}
 	if hasFiles {
-		fmt.Fprintf(&b, "I file del ticket #%d sono nella cartella .tickets/%d/ (relativa alla radice del repo). "+
+		fmt.Fprintf(&b, "Gli allegati del ticket #%d sono nella cartella "+
+			".tickets/%d/attachments/ (relativa alla radice del repo). "+
 			"Leggili prima di iniziare.", ticketID, ticketID)
 	}
 	return b.String()
