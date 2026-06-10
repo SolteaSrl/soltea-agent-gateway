@@ -199,6 +199,11 @@ func applyPendingIfAny(worker string) {
 		return
 	}
 	_ = os.Remove(pending)
+	// Aggiorna la cache della versione installata in modo che il prossimo poll
+	// NON consideri l'asset come "nuovo".
+	if err := writeAtomic(worker+".version", []byte(mk.Version+"\n"), 0o644); err != nil {
+		log.Printf("aggiornamento cache .version: %v", err)
+	}
 	log.Printf("UPDATE APPLICATO: %s -> v%s (sha=%s)", filepath.Base(worker), mk.Version, shorten(mk.SHA256))
 }
 
@@ -229,9 +234,7 @@ func rollback(worker string) bool {
 func updatePollLoop(ctx context.Context, gatewayBase, worker string, every time.Duration) {
 	client := &selfupdate.Client{GatewayBase: gatewayBase}
 	doCheck := func() {
-		// La versione "corrente" del worker la deduciamo dal contenuto del marker
-		// applicato (se c'e'). Altrimenti "" -> scarica sempre (il primo giro).
-		current := readAppliedVersion(worker)
+		current := currentWorkerVersion(worker)
 		m, err := client.Fetch(ctx)
 		if err != nil {
 			log.Printf("update check: errore %v", err)
@@ -241,9 +244,10 @@ func updatePollLoop(ctx context.Context, gatewayBase, worker string, every time.
 			return // 404 lato gateway: auto-update off
 		}
 		if !m.IsNewerThan(current) {
+			log.Printf("update check: versione corrente %q == latest %q, niente da fare", current, m.Version)
 			return
 		}
-		log.Printf("update disponibile: %s -> %s", current, m.Version)
+		log.Printf("update disponibile: %q -> %q", current, m.Version)
 		if err := client.Download(ctx, worker, *m); err != nil {
 			log.Printf("download update: errore %v", err)
 			return
@@ -263,20 +267,54 @@ func updatePollLoop(ctx context.Context, gatewayBase, worker string, every time.
 	}
 }
 
-// readAppliedVersion legge il marker <worker>.update-applied (scritto dopo
-// applyPendingIfAny in una versione futura) o il marker pending se non c'e'.
-// Per ora -> stringa vuota se non sa la versione, cosi' Fetch torna sempre il
-// manifest e IsNewerThan compara con "". Funziona bene: la prima volta scarica,
-// poi confrontera' con la versione che il launcher annota dopo l'apply.
-func readAppliedVersion(worker string) string {
-	if mk, err := selfupdate.ReadPending(worker); err == nil {
-		return mk.Version
+// currentWorkerVersion ritorna la versione attualmente installata del worker.
+// Risoluzione, in ordine:
+//  1. cache su file `<worker>.version` (scritto da applyPendingIfAny dopo un
+//     update e popolato al primo giro come fallback)
+//  2. exec `worker -print-version` (sicuro: il flag non avvia la sessione, esce
+//     subito)
+//  3. "" se entrambi falliscono (vecchio comportamento -> scarica sempre)
+//
+// Cache: dopo (2) scriviamo il risultato su `<worker>.version` cosi' i giri
+// successivi non riavviano il worker per leggere la versione.
+func currentWorkerVersion(worker string) string {
+	cachePath := worker + ".version"
+	if data, err := os.ReadFile(cachePath); err == nil {
+		if v := string(bytesTrim(data)); v != "" {
+			return v
+		}
 	}
-	data, err := os.ReadFile(worker + ".version")
+	// Exec di sondaggio: timeout 10s e' piu' che abbastanza per un flag che
+	// stampa una const.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, worker, "-print-version")
+	out, err := cmd.Output()
 	if err != nil {
+		log.Printf("currentWorkerVersion: impossibile interrogare %s (-print-version): %v", filepath.Base(worker), err)
 		return ""
 	}
-	return string(bytesTrim(data))
+	v := string(bytesTrim(out))
+	if v == "" {
+		return ""
+	}
+	if err := writeAtomic(cachePath, []byte(v+"\n"), 0o644); err != nil {
+		log.Printf("cache .version: %v", err)
+	}
+	return v
+}
+
+// writeAtomic scrive via temp + rename. Errori solo se il rename fallisce.
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func bytesTrim(b []byte) []byte {

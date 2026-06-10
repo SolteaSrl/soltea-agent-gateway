@@ -19,6 +19,7 @@ import (
 
 	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/config"
 	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/svc"
+	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/version"
 )
 
 func main() {
@@ -26,8 +27,14 @@ func main() {
 	log.SetPrefix("[agent-runner] ")
 
 	cfgPath := flag.String("config", defaultConfigPath(), "percorso del config.json")
+	printVer := flag.Bool("print-version", false, "stampa la versione su stdout e esce (usato dal launcher per auto-update)")
 	flag.Parse()
 	verb := flag.Arg(0)
+
+	if *printVer {
+		fmt.Println(version.Runner)
+		return
+	}
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
