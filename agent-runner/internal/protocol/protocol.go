@@ -2,6 +2,12 @@
 // Vedi docs/PROTOCOL.md per la specifica completa.
 package protocol
 
+// ProtocolVersion e' la versione del protocollo gateway<->runner dichiarata nel
+// frame hello. Bump quando si introduce un cambio non retrocompatibile (rimozione
+// di un campo richiesto, semantica nuova di un frame esistente). Aggiunte di
+// campi opzionali (es. chat.delta) NON richiedono bump.
+const ProtocolVersion = 1
+
 const (
 	Hello       = "hello"
 	Welcome     = "welcome"
@@ -39,6 +45,16 @@ func Hello_(agentID, token, runnerVersion string, projects []map[string]any) map
 	return map[string]any{
 		"type": Hello, "role": RoleAgent, "agent_id": agentID,
 		"token": token, "projects": projects, "runner_version": runnerVersion,
+		"protocol_version": ProtocolVersion,
+	}
+}
+
+// ChatDeltaFrame e' un frammento di risposta dell'agente trasmesso live, prima
+// del chat.result finale. seq e' un numero progressivo per sessione (>=0):
+// permette al client di ordinare/individuare buchi (rare in TCP) se serve.
+func ChatDeltaFrame(sessionID string, seq int, text string) map[string]any {
+	return map[string]any{
+		"type": ChatDelta, "session_id": sessionID, "seq": seq, "text": text,
 	}
 }
 

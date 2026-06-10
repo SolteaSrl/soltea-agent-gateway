@@ -31,6 +31,7 @@ type sessionState struct {
 	ticketID        int
 	workdir         string
 	slog            *runlog.Session
+	deltaSeq        int // numero progressivo dei chat.delta emessi in questa sessione
 }
 
 func New(cfg *config.Config) *Agent {
@@ -167,7 +168,18 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 
 	prompt := buildFirstPrompt(in.Instructions, in.TicketID, hasFiles)
 	slog.Log(runlog.Event{Kind: "prompt", Direction: "out", Text: prompt})
-	res, err := a.runner.Run(ctx, projPath, prompt, "")
+	// Pre-registriamo lo stato sessione PRIMA di chiamare claude, cosi' il
+	// contatore di delta vive nella stessa entry per tutta la sessione e
+	// sopravvive a chat.send successivi (numerazione continua per sessione).
+	st := &sessionState{
+		claudeSessionID: "", projectID: in.ProjectID,
+		ticketID: in.TicketID, workdir: workdir, slog: slog,
+	}
+	a.mu.Lock()
+	a.sessions[in.SessionID] = st
+	a.mu.Unlock()
+
+	res, err := a.runner.Run(ctx, projPath, prompt, "", a.makeDeltaCallback(conn, in.SessionID, st))
 	a.logClaudeRaw(slog, res)
 	if err != nil {
 		a.failSession(conn, slog, in.SessionID, "claude_failed", err.Error())
@@ -175,10 +187,7 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 	}
 
 	a.mu.Lock()
-	a.sessions[in.SessionID] = &sessionState{
-		claudeSessionID: res.SessionID, projectID: in.ProjectID,
-		ticketID: in.TicketID, workdir: workdir, slog: slog,
-	}
+	st.claudeSessionID = res.SessionID
 	a.mu.Unlock()
 
 	slog.Log(runlog.Event{Kind: "result", Direction: "out", Text: res.Text, IsError: res.IsError,
@@ -205,7 +214,7 @@ func (a *Agent) handleChatSend(ctx context.Context, conn *wsclient.Conn, in prot
 
 	projPath, _ := a.cfg.ProjectPath(st.projectID)
 	st.slog.Log(runlog.Event{Kind: "prompt", Direction: "out", Text: in.Text})
-	res, err := a.runner.Run(ctx, projPath, in.Text, st.claudeSessionID)
+	res, err := a.runner.Run(ctx, projPath, in.Text, st.claudeSessionID, a.makeDeltaCallback(conn, in.SessionID, st))
 	a.logClaudeRaw(st.slog, res)
 	if err != nil {
 		a.failSession(conn, st.slog, in.SessionID, "claude_failed", err.Error())
@@ -240,6 +249,26 @@ func (a *Agent) logClaudeRaw(slog *runlog.Session, res *claude.Result) {
 		return
 	}
 	slog.Log(runlog.Event{Kind: "claude.raw", Stdout: res.RawStdout, Stderr: res.Stderr})
+}
+
+// makeDeltaCallback ritorna un callback che il runner claude invoca per ogni
+// blocco di testo dell'assistente. Il callback inoltra al gateway un chat.delta
+// con un seq progressivo PER sessione, e tiene traccia del delta nel transcript
+// JSONL (kind="chat.delta", direction="out").
+//
+// Errori di WriteJSON sono ignorati di proposito: il delta e' best-effort, il
+// chat.result finale resta la fonte di verita'. Se la sessione e' caduta nel
+// frattempo, l'orchestratrice non vedra' i delta ma vedra' comunque l'errore
+// successivo dal task.
+func (a *Agent) makeDeltaCallback(conn *wsclient.Conn, sessionID string, st *sessionState) func(text string) {
+	return func(text string) {
+		a.mu.Lock()
+		st.deltaSeq++
+		seq := st.deltaSeq
+		a.mu.Unlock()
+		_ = conn.WriteJSON(protocol.ChatDeltaFrame(sessionID, seq, text))
+		st.slog.Log(runlog.Event{Kind: "chat.delta", Direction: "out", Text: text})
+	}
 }
 
 // failSession logga e notifica un errore di sessione al gateway.
