@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -145,34 +146,49 @@ func (a *Agent) dispatch(ctx context.Context, conn *wsclient.Conn, in protocol.I
 }
 
 func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in protocol.Inbound) {
-	slog := a.lg.Session(in.SessionID, in.TicketID)
-	slog.Log(runlog.Event{Kind: "task.start", Direction: "in", Text: in.Instructions})
 	log.Printf("task.start sessione=%s ticket=%d progetto=%d", in.SessionID, in.TicketID, in.ProjectID)
 	a.lg.Info("sessione aperta: sessione=%s ticket=%d progetto=%d", in.SessionID, in.TicketID, in.ProjectID)
 
 	projPath, ok := a.cfg.ProjectPath(in.ProjectID)
 	if !ok {
+		// Senza projectPath non possiamo creare .agent-runner/ dentro il repo:
+		// usiamo il transcript legacy in <configDir>/logs/ come fallback.
+		slog := a.lg.Session(in.SessionID, in.TicketID)
+		slog.Log(runlog.Event{Kind: "task.start", Direction: "in", Text: in.Instructions})
 		a.failSession(conn, slog, in.SessionID, "project_not_declared", "Progetto non presidiato da questo agente.")
 		return
 	}
 
-	// Scarica e scompatta lo zip allegato in <repo>/.tickets/<id>/attachments/.
-	// La sotto-cartella separa l'input (allegati) da eventuali artefatti scritti
-	// durante il task e rende chiaro nel prompt cosa "leggere".
-	workdir := ticketDir(projPath, in.TicketID)
+	// Da qui in avanti tutto va sotto <projPath>/.agent-runner/.
+	slog := a.lg.SessionAt(sessionTranscriptPath(projPath, in.SessionID), in.SessionID, in.TicketID)
+	slog.Log(runlog.Event{Kind: "task.start", Direction: "in", Text: in.Instructions})
+
 	hasFiles := in.BlobID != ""
 	if hasFiles {
-		if err := a.fetchTicketZip(in.BlobID, attachmentsDir(workdir)); err != nil {
+		if err := a.fetchTicketZip(in.BlobID, attachmentsDirFor(projPath, in.TicketID)); err != nil {
 			a.failSession(conn, slog, in.SessionID, "blob_not_found", err.Error())
 			return
 		}
 	}
 
+	// Workdir per claude = scratch effimero della sessione (rimosso a task.done).
+	workdir := sessionWorkdir(projPath, in.SessionID)
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		a.failSession(conn, slog, in.SessionID, "internal", "creazione workdir: "+err.Error())
+		return
+	}
+
 	prompt := buildFirstPrompt(in.Instructions, in.TicketID, hasFiles)
+	savePromptFile(projPath, in.SessionID, prompt)
 	slog.Log(runlog.Event{Kind: "prompt", Direction: "out", Text: prompt})
-	// Pre-registriamo lo stato sessione PRIMA di chiamare claude, cosi' il
-	// contatore di delta vive nella stessa entry per tutta la sessione e
-	// sopravvive a chat.send successivi (numerazione continua per sessione).
+
+	// Stream raw NDJSON di claude (include thinking) in streams/<sid>.ndjson.
+	streamFile := openSessionStream(projPath, in.SessionID)
+	if streamFile != nil {
+		defer streamFile.Close()
+	}
+
+	// Pre-registriamo lo stato sessione PRIMA di chiamare claude.
 	st := &sessionState{
 		claudeSessionID: "", projectID: in.ProjectID,
 		ticketID: in.TicketID, workdir: workdir, slog: slog,
@@ -181,7 +197,10 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 	a.sessions[in.SessionID] = st
 	a.mu.Unlock()
 
-	res, err := a.runner.Run(ctx, projPath, prompt, "", a.makeDeltaCallback(conn, in.SessionID, st))
+	res, err := a.runner.Run(ctx, workdir, prompt, claude.RunOptions{
+		OnDelta:    a.makeDeltaCallback(conn, in.SessionID, st),
+		StreamSink: streamFile,
+	})
 	a.logClaudeRaw(slog, res)
 	if err != nil {
 		a.failSession(conn, slog, in.SessionID, "claude_failed", err.Error())
@@ -206,7 +225,6 @@ func (a *Agent) handleChatSend(ctx context.Context, conn *wsclient.Conn, in prot
 	st := a.sessions[in.SessionID]
 	a.mu.Unlock()
 	if st == nil {
-		// Sessione ignota: logghiamo comunque su un transcript dedicato.
 		slog := a.lg.Session(in.SessionID, in.TicketID)
 		a.failSession(conn, slog, in.SessionID, "unknown_session", "Sessione sconosciuta su questo agente.")
 		return
@@ -215,8 +233,19 @@ func (a *Agent) handleChatSend(ctx context.Context, conn *wsclient.Conn, in prot
 	log.Printf("chat.send sessione=%s", in.SessionID)
 
 	projPath, _ := a.cfg.ProjectPath(st.projectID)
+	savePromptFile(projPath, in.SessionID, in.Text)
 	st.slog.Log(runlog.Event{Kind: "prompt", Direction: "out", Text: in.Text})
-	res, err := a.runner.Run(ctx, projPath, in.Text, st.claudeSessionID, a.makeDeltaCallback(conn, in.SessionID, st))
+
+	streamFile := openSessionStream(projPath, in.SessionID)
+	if streamFile != nil {
+		defer streamFile.Close()
+	}
+
+	res, err := a.runner.Run(ctx, st.workdir, in.Text, claude.RunOptions{
+		ResumeSession: st.claudeSessionID,
+		OnDelta:       a.makeDeltaCallback(conn, in.SessionID, st),
+		StreamSink:    streamFile,
+	})
 	a.logClaudeRaw(st.slog, res)
 	if err != nil {
 		a.failSession(conn, st.slog, in.SessionID, "claude_failed", err.Error())
@@ -241,7 +270,9 @@ func (a *Agent) handleTaskDone(in protocol.Inbound) {
 		st.slog.Log(runlog.Event{Kind: "task.done", Direction: "in"})
 		log.Printf("task.done sessione=%s", in.SessionID)
 		a.lg.Info("sessione chiusa: sessione=%s ticket=%d progetto=%d", in.SessionID, st.ticketID, st.projectID)
-		cleanupTicketDir(st.workdir)
+		// Pulisce solo lo scratch work/<sid>/. Transcript, stream, prompt e
+		// attachments restano in .agent-runner/ per ispezione post-mortem.
+		cleanupSessionWorkdir(st.workdir)
 	}
 }
 

@@ -48,15 +48,26 @@ type Runner struct {
 
 func New(opt Options) *Runner { return &Runner{opt: opt} }
 
-// Run esegue un turno di claude. Se resumeSession e' vuoto avvia una nuova
-// sessione, altrimenti riprende quella esistente (--resume).
+// RunOptions raccoglie i parametri opzionali di Run. ResumeSession="" = nuova
+// sessione; OnDelta=nil = niente streaming verso il gateway; StreamSink=nil =
+// niente file ndjson live (il raw resta comunque dentro Result.RawStdout).
+type RunOptions struct {
+	ResumeSession string
+	OnDelta       func(text string)
+	StreamSink    io.Writer
+}
+
+// Run esegue un turno di claude. Compat: per chi non usa opzioni esiste
+// `RunSimple(ctx, workdir, prompt)`. Vedi RunOptions per il resto.
 //
-// onDelta, se non nil, viene chiamato per ogni blocco di testo emesso dai
-// frame "assistant" durante l'esecuzione (streaming). Il chiamante NON deve
-// bloccare a lungo nel callback: tipicamente lo usa per inoltrare un
-// chat.delta sulla WS al gateway.
-func (r *Runner) Run(ctx context.Context, workdir, prompt, resumeSession string, onDelta func(text string)) (*Result, error) {
-	args := r.buildArgs(prompt, resumeSession)
+// Se opt.OnDelta e' non nil viene chiamato per ogni blocco "text" emesso dai
+// frame "assistant" durante l'esecuzione (streaming, non blocking).
+//
+// Se opt.StreamSink e' non nil ogni byte dello stdout di claude (NDJSON con
+// blocchi text, thinking, tool_use, system, result) viene anche scritto su quel
+// writer in tempo reale: utile per salvarlo in <projectPath>/.agent-runner/streams/.
+func (r *Runner) Run(ctx context.Context, workdir, prompt string, opt RunOptions) (*Result, error) {
+	args := r.buildArgs(prompt, opt.ResumeSession)
 
 	var cmd *exec.Cmd
 	if r.opt.UseGitBash {
@@ -79,7 +90,7 @@ func (r *Runner) Run(ctx context.Context, workdir, prompt, resumeSession string,
 			fmt.Errorf("avvio claude: %w", err)
 	}
 
-	res, rawOut, parseErr := parseStream(stdout, onDelta)
+	res, rawOut, parseErr := parseStream(stdout, opt.OnDelta, opt.StreamSink)
 
 	runErr := cmd.Wait()
 	stderr := strings.TrimSpace(errBuf.String())
@@ -148,11 +159,20 @@ type streamEvent struct {
 // blocchi assistant text ed estrae il record "result" finale. Tollera righe
 // non-JSON (vengono ignorate ma restano nel raw).
 //
+// streamSink (opzionale): ogni byte di input viene anche scritto su questo
+// writer in tempo reale -> serve a persistere il raw NDJSON di claude
+// (con i blocchi "thinking") in <projectPath>/.agent-runner/streams/<sid>.ndjson
+// senza aspettare la fine del task.
+//
 // Ritorna sempre rawOut (anche su errore parziale), cosi' chi chiama puo'
 // loggare tutto per diagnosi.
-func parseStream(r io.Reader, onDelta func(text string)) (*Result, string, error) {
+func parseStream(r io.Reader, onDelta func(text string), streamSink io.Writer) (*Result, string, error) {
 	var rawBuf bytes.Buffer
-	tee := io.TeeReader(r, &rawBuf)
+	var sinks io.Writer = &rawBuf
+	if streamSink != nil {
+		sinks = io.MultiWriter(&rawBuf, streamSink)
+	}
+	tee := io.TeeReader(r, sinks)
 	scanner := bufio.NewScanner(tee)
 	// claude puo' produrre righe lunghe (messaggi assistant interi): alziamo
 	// il buffer di scanner a 4 MB per riga (default 64 KB).

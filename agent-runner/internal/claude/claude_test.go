@@ -18,7 +18,7 @@ func TestParseStream_HappyPath(t *testing.T) {
 	}, "\n") + "\n"
 
 	var deltas []string
-	res, raw, err := parseStream(strings.NewReader(input), func(t string) { deltas = append(deltas, t) })
+	res, raw, err := parseStream(strings.NewReader(input), func(t string) { deltas = append(deltas, t) }, nil)
 	if err != nil {
 		t.Fatalf("parseStream: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestParseStream_NoDeltaCallback(t *testing.T) {
 	// Senza callback non si rompe nulla: il result viene comunque parsato.
 	input := `{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}` + "\n" +
 		`{"type":"result","is_error":false,"result":"x","session_id":"s"}` + "\n"
-	res, _, err := parseStream(strings.NewReader(input), nil)
+	res, _, err := parseStream(strings.NewReader(input), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStream: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestParseStream_NoDeltaCallback(t *testing.T) {
 
 func TestParseStream_IsErrorTrue(t *testing.T) {
 	input := `{"type":"result","is_error":true,"result":"fallito","session_id":"s2"}` + "\n"
-	res, _, err := parseStream(strings.NewReader(input), nil)
+	res, _, err := parseStream(strings.NewReader(input), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStream: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestParseStream_IgnoresNonJSONLines(t *testing.T) {
 		`{"type":"result","is_error":false,"result":"ok","session_id":"s3"}`,
 	}, "\n") + "\n"
 	var deltas []string
-	res, _, err := parseStream(strings.NewReader(input), func(t string) { deltas = append(deltas, t) })
+	res, _, err := parseStream(strings.NewReader(input), func(t string) { deltas = append(deltas, t) }, nil)
 	if err != nil {
 		t.Fatalf("parseStream: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestParseStream_NoResultReturnsNilResult(t *testing.T) {
 	// Se claude muore prima del result, il parser ritorna res=nil senza errore di parsing.
 	input := `{"type":"system","subtype":"init"}` + "\n" +
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"a"}]}}` + "\n"
-	res, raw, err := parseStream(strings.NewReader(input), nil)
+	res, raw, err := parseStream(strings.NewReader(input), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStream: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestParseStream_LongLineAboveDefaultScannerBuffer(t *testing.T) {
 	input := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + big + `"}]}}` + "\n" +
 		`{"type":"result","is_error":false,"result":"final","session_id":"s4"}` + "\n"
 	var deltas []string
-	res, _, err := parseStream(strings.NewReader(input), func(t string) { deltas = append(deltas, t) })
+	res, _, err := parseStream(strings.NewReader(input), func(t string) { deltas = append(deltas, t) }, nil)
 	if err != nil {
 		t.Fatalf("parseStream: %v", err)
 	}
