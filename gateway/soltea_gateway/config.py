@@ -46,6 +46,17 @@ class Config:
     # Dimensione massima di un blob (byte).
     blob_max_bytes: int = 200 * 1024 * 1024
     heartbeat_seconds: int = 30
+    # Quando l'orchestratrice si disconnette mentre ha sessioni aperte, il gateway
+    # NON chiude subito la sessione: la tiene "orfana" per questo numero di secondi,
+    # bufferizzando i frame dell'agente, cosi' l'orch puo' riconnettersi e
+    # riattaccarsi via `session_attach`. Oltre la finestra la sessione viene chiusa
+    # e l'agente notificato. Impostare a 0 per disabilitare il riattacco.
+    orphan_grace_seconds: int = 60
+    # Cap sui frame bufferizzati per sessione orfana. Oltre questa soglia la
+    # sessione viene chiusa con `session_buffer_overflow` (preferiamo fallire
+    # subito invece di consumare RAM in modo non limitato o droppare frame
+    # silenziosamente).
+    orphan_buffer_max_frames: int = 1000
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
@@ -63,6 +74,8 @@ class Config:
             blob_ttl_seconds=int(e.get("GW_BLOB_TTL_SECONDS", str(24 * 3600))),
             blob_max_bytes=int(e.get("GW_BLOB_MAX_BYTES", str(200 * 1024 * 1024))),
             heartbeat_seconds=int(e.get("GW_HEARTBEAT_SECONDS", "30")),
+            orphan_grace_seconds=int(e.get("GW_ORPHAN_GRACE_SECONDS", "60")),
+            orphan_buffer_max_frames=int(e.get("GW_ORPHAN_BUFFER_MAX_FRAMES", "1000")),
         )
 
     def check_agent_token(self, agent_id: str, token: str) -> bool:

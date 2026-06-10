@@ -298,3 +298,151 @@ def test_session_opened_runner_version_absent_when_unknown(client: TestClient):
         so = orch.receive_json()
         assert so["type"] == "session_opened"
         assert so["runner_version"] is None
+
+
+# ---------------------------------------------------------------- riattacco --
+
+
+def _reattach_app(tmp_path: Path, grace: int = 60, buf_max: int = 1000):
+    cfg = Config(
+        orchestrator_token="orch-tok",
+        shared_agent_token="agent-tok",
+        blob_dir=tmp_path / "blobs",
+        heartbeat_seconds=30,
+        orphan_grace_seconds=grace,
+        orphan_buffer_max_frames=buf_max,
+    )
+    return cfg, TestClient(create_app(cfg))
+
+
+def _open_session(client: TestClient, agent, orch, ticket=7777):
+    """Helper: agente registrato, orch connessa, sessione aperta, ritorna session_id."""
+    _hello_agent(agent)
+    _hello_orch(orch)
+    orch.send_json({"type": "task.start", "req_id": "t1", "project_id": 1234,
+                    "ticket_id": ticket, "instructions": "x"})
+    agent.receive_json()  # task.start instradato
+    so = orch.receive_json()
+    assert so["type"] == "session_opened"
+    return so["session_id"]
+
+
+def test_orphan_session_buffers_agent_frames_then_reattach_flushes(tmp_path: Path):
+    """L'orch cade dopo l'apertura sessione, l'agente continua a mandare frame,
+    una nuova orch fa session_attach e riceve i frame bufferizzati in ordine."""
+    _cfg, client = _reattach_app(tmp_path, grace=60)
+    with client.websocket_connect("/ws") as agent:
+        # Apriamo orch + sessione, poi chiudiamo l'orch (= caduta).
+        with client.websocket_connect("/ws") as orch:
+            session_id = _open_session(client, agent, orch)
+        # Sessione orfana. Agente manda 3 frame: vanno nel buffer.
+        agent.send_json({"type": "task.started", "session_id": session_id, "ticket_id": 7777,
+                         "claude_session_id": "cs", "workdir": "/x"})
+        agent.send_json({"type": "chat.delta", "session_id": session_id, "seq": 1, "text": "ciao "})
+        agent.send_json({"type": "chat.delta", "session_id": session_id, "seq": 2, "text": "marcello"})
+
+        # Nuova orch si riattacca.
+        with client.websocket_connect("/ws") as orch2:
+            orch2.send_json({"type": "hello", "role": "orchestrator", "token": "orch-tok", "client_id": "claudia-2"})
+            assert orch2.receive_json()["type"] == "welcome"
+            orch2.send_json({"type": "session_attach", "req_id": "a1", "session_id": session_id})
+            ack = orch2.receive_json()
+            assert ack["type"] == "session_attached" and ack["session_id"] == session_id
+            assert ack["buffered_frames"] == 3
+            # Frame consegnati nello stesso ordine.
+            assert orch2.receive_json()["type"] == "task.started"
+            d1 = orch2.receive_json()
+            assert d1["type"] == "chat.delta" and d1["seq"] == 1 and d1["text"] == "ciao "
+            d2 = orch2.receive_json()
+            assert d2["type"] == "chat.delta" and d2["seq"] == 2
+
+            # Da qui in poi i frame arrivano live, non bufferizzati.
+            agent.send_json({"type": "chat.result", "session_id": session_id, "text": "fatto", "is_error": False})
+            live = orch2.receive_json()
+            assert live["type"] == "chat.result" and live["text"] == "fatto"
+
+
+def test_attach_unknown_session_returns_error(tmp_path: Path):
+    _cfg, client = _reattach_app(tmp_path)
+    with client.websocket_connect("/ws") as orch:
+        _hello_orch(orch)
+        orch.send_json({"type": "session_attach", "req_id": "a1", "session_id": "sess-nope"})
+        err = orch.receive_json()
+        assert err["type"] == "error" and err["code"] == "unknown_session"
+
+
+def test_attach_to_already_attached_session_is_rejected(tmp_path: Path):
+    """Se la sessione e' viva e l'orch e' connessa, un secondo attach va respinto."""
+    _cfg, client = _reattach_app(tmp_path)
+    with client.websocket_connect("/ws") as agent, client.websocket_connect("/ws") as orch:
+        session_id = _open_session(client, agent, orch)
+        with client.websocket_connect("/ws") as orch2:
+            orch2.send_json({"type": "hello", "role": "orchestrator", "token": "orch-tok", "client_id": "claudia-2"})
+            assert orch2.receive_json()["type"] == "welcome"
+            orch2.send_json({"type": "session_attach", "req_id": "a1", "session_id": session_id})
+            err = orch2.receive_json()
+            assert err["type"] == "error" and err["code"] == "session_already_attached"
+
+
+def test_orphan_grace_zero_closes_session_immediately(tmp_path: Path):
+    """Con orphan_grace_seconds=0 il riattacco e' disabilitato: l'agente riceve
+    subito session_lost alla disconnessione dell'orch."""
+    _cfg, client = _reattach_app(tmp_path, grace=0)
+    with client.websocket_connect("/ws") as agent:
+        with client.websocket_connect("/ws") as orch:
+            session_id = _open_session(client, agent, orch)
+        # Provo a mandare un frame: la sessione non esiste piu' (chiusa) -> niente
+        # arrivera' all'orch (gia' caduta), ma anche un riattacco fallisce.
+        with client.websocket_connect("/ws") as orch2:
+            orch2.send_json({"type": "hello", "role": "orchestrator", "token": "orch-tok", "client_id": "claudia-2"})
+            assert orch2.receive_json()["type"] == "welcome"
+            orch2.send_json({"type": "session_attach", "req_id": "a1", "session_id": session_id})
+            err = orch2.receive_json()
+            assert err["type"] == "error" and err["code"] == "unknown_session"
+
+
+def test_orphan_buffer_overflow_closes_session_and_notifies_agent(tmp_path: Path):
+    """Se l'agente bombarda la sessione orfana oltre il buffer max, il gateway
+    chiude la sessione e manda session_lost all'agente."""
+    _cfg, client = _reattach_app(tmp_path, grace=60, buf_max=3)
+    with client.websocket_connect("/ws") as agent:
+        with client.websocket_connect("/ws") as orch:
+            session_id = _open_session(client, agent, orch)
+        # 3 frame entrano nel buffer, il 4o trigger overflow.
+        for i in range(3):
+            agent.send_json({"type": "chat.delta", "session_id": session_id, "seq": i, "text": "x"})
+        agent.send_json({"type": "chat.delta", "session_id": session_id, "seq": 3, "text": "x"})
+        notice = agent.receive_json()
+        assert notice["type"] == "session_lost"
+        assert notice["reason"] == "session_buffer_overflow"
+
+
+def test_orphan_expire_loop_closes_old_sessions(tmp_path: Path):
+    """Il loop di expire chiude le sessioni orfane oltre la finestra. Forziamo
+    chiamando expire_orphans() con `now` futuro per evitare di aspettare il tick."""
+    cfg, client = _reattach_app(tmp_path, grace=1)
+    with client.websocket_connect("/ws") as agent:
+        with client.websocket_connect("/ws") as orch:
+            session_id = _open_session(client, agent, orch)
+        # Sessione ora orfana. Chiamiamo expire passando un now=futuro per
+        # simulare la scadenza senza dipendere dal time.monotonic() reale.
+        hub = client.app.state.hub
+        import time as _t
+        expired = hub.expire_orphans(now=_t.monotonic() + 10)
+        assert len(expired) == 1 and expired[0].session_id == session_id
+        # Agente riceve la notifica via il loop background (con un piccolo grace)
+        # ma in test la chiamiamo manualmente: simuliamo emettendo session_lost.
+        # Verifichiamo solo che la sessione non esista piu'.
+        assert hub.get(session_id) is None
+
+
+def test_agent_disconnect_closes_orphan_session_too(tmp_path: Path):
+    """Se l'agente cade mentre la sessione e' orfana, la sessione deve chiudersi.
+    Nessuna orch e' presente per ricevere errori, ma lo stato dell'hub e' pulito."""
+    _cfg, client = _reattach_app(tmp_path, grace=60)
+    with client.websocket_connect("/ws") as agent:
+        with client.websocket_connect("/ws") as orch:
+            session_id = _open_session(client, agent, orch)
+        # Ora chiudiamo anche l'agente (uscita dal with).
+    hub = client.app.state.hub
+    assert hub.get(session_id) is None

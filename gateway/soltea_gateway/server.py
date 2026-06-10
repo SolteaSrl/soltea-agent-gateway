@@ -38,7 +38,11 @@ def _bearer(authorization: str | None) -> str:
 def create_app(config: Config | None = None) -> FastAPI:
     cfg = config or Config.from_env()
     registry = Registry()
-    hub = Hub(registry)
+    hub = Hub(
+        registry,
+        orphan_grace_seconds=cfg.orphan_grace_seconds,
+        orphan_buffer_max_frames=cfg.orphan_buffer_max_frames,
+    )
     blobs = BlobStore(cfg.blob_dir, cfg.blob_ttl_seconds)
 
     # Token statici (da env) vs token creati a runtime (persistiti su file).
@@ -52,13 +56,15 @@ def create_app(config: Config | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         gc_task = asyncio.create_task(_blob_gc_loop(blobs, cfg.blob_ttl_seconds))
+        orphan_task = asyncio.create_task(_orphan_expire_loop(hub))
         log.info("Gateway avviato su %s:%s", cfg.host, cfg.port)
         try:
             yield
         finally:
-            gc_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await gc_task
+            for t in (gc_task, orphan_task):
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
 
     app = FastAPI(title="soltea-agent-gateway", version="0.1.0", lifespan=lifespan)
     # Riferimenti utili ai test.
@@ -358,6 +364,31 @@ async def _handle_orchestrator_frame(
             hub.close_session(sid)
         return
 
+    if ftype == P.SESSION_ATTACH:
+        sid = frame.get("session_id", "")
+        sess, err, buffered = hub.attach_orchestrator(conn, sid)
+        if err is not None:
+            code = {
+                "unknown_session": P.ERR_UNKNOWN_SESSION,
+                "session_already_attached": P.ERR_SESSION_ALREADY_ATTACHED,
+            }[err]
+            await conn.send(P.error(code, f"Riattacco fallito: {err}",
+                                    req_id=frame.get("req_id"), session_id=sid))
+            return
+        assert sess is not None
+        # Conferma del riattacco + flush dei frame bufferizzati durante l'orfanaggio.
+        await conn.send({
+            "type": P.SESSION_ATTACHED,
+            "req_id": frame.get("req_id"),
+            "session_id": sess.session_id,
+            "agent_id": sess.agent_id,
+            "buffered_frames": len(buffered),
+        })
+        for buf_frame in buffered:
+            await conn.send(buf_frame)
+        log.info("Riattacco sessione %s da %s (%d frame in coda)", sid, conn.peer_id, len(buffered))
+        return
+
     await conn.send(P.error(P.ERR_INTERNAL, f"Frame non gestito dall'orchestratrice: {ftype!r}"))
 
 
@@ -368,8 +399,20 @@ async def _handle_agent_frame(frame: dict, conn: Connection, hub: Hub, blobs: Bl
         sid = frame.get("session_id")
         sess = hub.get(sid) if sid else None
         if sess is None:
-            # L'orchestratrice potrebbe essersi disconnessa: ignoriamo in silenzio.
             log.debug("Frame agente per sessione ignota %s", sid)
+            return
+        if sess.orchestrator is None:
+            # Sessione orfana: bufferizza per il riattacco. Se il buffer scoppia,
+            # chiudiamo la sessione e notifichiamo l'agente.
+            if not hub.buffer_agent_frame(sess, frame):
+                hub.close_session(sess.session_id)
+                with contextlib.suppress(Exception):
+                    await conn.send({
+                        "type": P.SESSION_LOST, "session_id": sess.session_id,
+                        "reason": P.ERR_SESSION_BUFFER_OVERFLOW,
+                    })
+                log.warning("Sessione %s chiusa per buffer overflow (>%d frame).",
+                            sess.session_id, hub.orphan_buffer_max_frames)
             return
         await sess.orchestrator.send(frame)
         return
@@ -377,16 +420,28 @@ async def _handle_agent_frame(frame: dict, conn: Connection, hub: Hub, blobs: Bl
 
 
 async def _cleanup(conn: Connection, registry: Registry, hub: Hub) -> None:
-    affected = hub.drop_connection(conn)
     if conn.role == P.ROLE_AGENT:
+        affected = hub.drop_agent(conn)
         registry.unregister(conn.peer_id)
-        # Avvisa le orchestratrici delle sessioni cadute.
         for sess in affected:
-            with contextlib.suppress(Exception):
-                await sess.orchestrator.send(
-                    P.error(P.ERR_NO_AGENT, "Agente disconnesso.", session_id=sess.session_id)
-                )
-    log.info("Connessione chiusa: %s (sessioni chiuse: %d)", conn, len(affected))
+            # Sessione chiusa per caduta agente: l'orch (se presente) viene
+            # avvisata. Se la sessione era gia' orfana, l'orch non c'e' e nessuno
+            # ricevera' l'errore.
+            if sess.orchestrator is not None:
+                with contextlib.suppress(Exception):
+                    await sess.orchestrator.send(
+                        P.error(P.ERR_NO_AGENT, "Agente disconnesso.", session_id=sess.session_id)
+                    )
+        log.info("Agente disconnesso: %s (sessioni chiuse: %d)", conn, len(affected))
+        return
+
+    # Orchestratrice: marca le sessioni come orfane (saranno chiuse al timeout).
+    orphaned = hub.orphan_orchestrator(conn)
+    if hub.orphan_grace_seconds > 0 and orphaned:
+        log.info("Orchestratrice disconnessa: %s (sessioni orfane: %d, grace=%ds)",
+                 conn, len(orphaned), hub.orphan_grace_seconds)
+    else:
+        log.info("Orchestratrice disconnessa: %s (sessioni chiuse: %d)", conn, len(orphaned))
 
 
 async def _blob_gc_loop(blobs: BlobStore, ttl: int) -> None:
@@ -397,3 +452,31 @@ async def _blob_gc_loop(blobs: BlobStore, ttl: int) -> None:
             removed = blobs.gc()
             if removed:
                 log.info("Blob GC: rimossi %d", removed)
+
+
+async def _orphan_expire_loop(hub: Hub) -> None:
+    """Loop periodico che chiude le sessioni orfane oltre la finestra di grace.
+
+    Per ogni sessione scaduta notifica l'agente con `session_lost` (best-effort:
+    se l'agente e' anche lui giu' nel frattempo il send fallisce silenziosamente).
+    """
+    if hub.orphan_grace_seconds <= 0:
+        return
+    # Tick al massimo ogni 5 secondi, mai meno di un quarto della finestra.
+    interval = max(1, min(5, hub.orphan_grace_seconds // 4 or 1))
+    while True:
+        await asyncio.sleep(interval)
+        with contextlib.suppress(Exception):
+            expired = hub.expire_orphans()
+            if not expired:
+                continue
+            for sess in expired:
+                agent_entry = hub.registry.get(sess.agent_id)
+                if agent_entry is None:
+                    continue
+                with contextlib.suppress(Exception):
+                    await agent_entry.conn.send({
+                        "type": P.SESSION_LOST, "session_id": sess.session_id,
+                        "reason": P.ERR_SESSION_ORPHAN_EXPIRED,
+                    })
+            log.info("Sessioni orfane scadute: %d", len(expired))
