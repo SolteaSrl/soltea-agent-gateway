@@ -96,9 +96,30 @@ type Event struct {
 	ClaudeSession string  `json:"claude_session_id,omitempty"`
 }
 
-// Session lega gli eventi a un singolo session_id/ticket.
+// Session lega gli eventi a un singolo session_id/ticket. Il transcript
+// finisce nella cartella globale del Logger (<configDir>/logs/), nel formato
+// legacy `ticket-<id>-<session>.jsonl`. Usato solo come fallback quando il
+// progetto non e' ancora noto (es. errore prima di risolvere il workdir).
 func (l *Logger) Session(sessionID string, ticketID int) *Session {
-	return &Session{l: l, id: sessionID, ticket: ticketID}
+	if l == nil {
+		return nil
+	}
+	name := fmt.Sprintf("ticket-%d-%s.jsonl", ticketID, sanitize(sessionID))
+	return &Session{l: l, id: sessionID, ticket: ticketID, path: filepath.Join(l.dir, name)}
+}
+
+// SessionAt apre un transcript di sessione a un percorso esplicito (es.
+// <projectPath>/.agent-runner/sessions/<sid>.jsonl). La cartella padre viene
+// creata se serve. Usato dall'agent per tenere il transcript dentro
+// .agent-runner/ del progetto, non in <configDir>/logs/.
+func (l *Logger) SessionAt(path string, sessionID string, ticketID int) *Session {
+	if l == nil {
+		return nil
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	return &Session{l: l, id: sessionID, ticket: ticketID, path: path}
 }
 
 // Session e' il writer del transcript di una sessione.
@@ -106,20 +127,20 @@ type Session struct {
 	l      *Logger
 	id     string
 	ticket int
+	path   string
 }
 
 // File e' il percorso del transcript di questa sessione.
 func (s *Session) File() string {
-	if s == nil || s.l == nil {
+	if s == nil {
 		return ""
 	}
-	name := fmt.Sprintf("ticket-%d-%s.jsonl", s.ticket, sanitize(s.id))
-	return filepath.Join(s.l.dir, name)
+	return s.path
 }
 
 // Log appende un evento al transcript della sessione (una riga JSON).
 func (s *Session) Log(ev Event) {
-	if s == nil || s.l == nil {
+	if s == nil || s.l == nil || s.path == "" {
 		return
 	}
 	ev.Time = now()
@@ -133,7 +154,7 @@ func (s *Session) Log(ev Event) {
 	}
 	s.l.mu.Lock()
 	defer s.l.mu.Unlock()
-	f, err := os.OpenFile(s.File(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}

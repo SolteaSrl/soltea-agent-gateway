@@ -12,28 +12,101 @@ import (
 	"time"
 )
 
-// ticketDir e' la radice della cartella di sessione del ticket, dentro il repo.
-// La struttura ora e':
+// Struttura .agent-runner/ (radice del repo del progetto, vedi DESIGN):
 //
-//	<repo>/.tickets/<id>/                  <- radice sessione (workdir scratch del task)
-//	<repo>/.tickets/<id>/attachments/      <- file allegati dall'orchestratrice
+//	<repo>/.agent-runner/
+//	├── sessions/<session_id>.jsonl     <- transcript della sessione (JSONL)
+//	├── streams/<session_id>.ndjson     <- output stream-json raw di claude (include thinking)
+//	├── prompts/<session_id>.md         <- prompt inviato a claude (debug)
+//	├── work/<session_id>/              <- scratch del task (rimosso a fine sessione)
+//	└── attachments/<ticket_id>/        <- file dall'orchestratrice (--attach), persistenti
 //
-// La sotto-cartella `attachments/` separa cio' che il task scarica (dato di input)
-// da eventuali artefatti che claude scrive durante il lavoro, evitando conflitti
-// di path e rendendo chiaro nel prompt "leggi qui i file allegati".
-func ticketDir(projectPath string, ticketID int) string {
-	return filepath.Join(projectPath, ".tickets", strconv.Itoa(ticketID))
+// Un solo posto per tutto cio' che il runner produce per quel progetto.
+// Consiglio: aggiungere `.agent-runner/` al .gitignore del repo cliente.
+func agentRunnerDir(projectPath string) string {
+	return filepath.Join(projectPath, ".agent-runner")
 }
 
-func attachmentsDir(ticketDir string) string {
-	return filepath.Join(ticketDir, "attachments")
+func sessionWorkdir(projectPath, sessionID string) string {
+	return filepath.Join(agentRunnerDir(projectPath), "work", sanitizeID(sessionID))
 }
 
-func cleanupTicketDir(dir string) {
-	if dir == "" {
+func attachmentsDirFor(projectPath string, ticketID int) string {
+	return filepath.Join(agentRunnerDir(projectPath), "attachments", strconv.Itoa(ticketID))
+}
+
+func sessionTranscriptPath(projectPath, sessionID string) string {
+	return filepath.Join(agentRunnerDir(projectPath), "sessions", sanitizeID(sessionID)+".jsonl")
+}
+
+func sessionStreamPath(projectPath, sessionID string) string {
+	return filepath.Join(agentRunnerDir(projectPath), "streams", sanitizeID(sessionID)+".ndjson")
+}
+
+func sessionPromptPath(projectPath, sessionID string) string {
+	return filepath.Join(agentRunnerDir(projectPath), "prompts", sanitizeID(sessionID)+".md")
+}
+
+// cleanupSessionWorkdir rimuove SOLO la sotto-cartella work/<session_id>/.
+// Lascia intatti transcript, stream, prompt e attachments: utili dopo la fine.
+func cleanupSessionWorkdir(workdir string) {
+	if workdir == "" {
 		return
 	}
-	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(workdir)
+}
+
+// sanitizeID rende un id sicuro come nome file/cartella (no slash, no colon).
+func sanitizeID(s string) string {
+	if s == "" {
+		return "nosession"
+	}
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			out = append(out, r)
+		default:
+			out = append(out, '_')
+		}
+	}
+	return string(out)
+}
+
+// savePromptFile scrive il prompt ricevuto su file (debug / ispezione). Non e'
+// un errore se fallisce: il logging persistente in transcript resta autorevole.
+func savePromptFile(projectPath, sessionID, prompt string) {
+	path := sessionPromptPath(projectPath, sessionID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	// O_APPEND: turni successivi (chat.send) si accodano allo stesso file con
+	// un separatore visibile, cosi' il prompt diventa la storia completa.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Size() > 0 {
+		_, _ = f.WriteString("\n\n---\n\n")
+	}
+	_, _ = f.WriteString(prompt)
+	_, _ = f.WriteString("\n")
+}
+
+// openSessionStream apre/crea il file streams/<sid>.ndjson per scrivere il raw
+// NDJSON di claude (include eventi assistant text, thinking, tool_use, result).
+// Ritorna nil se non si riesce ad aprire: il claude.raw nel transcript resta.
+func openSessionStream(projectPath, sessionID string) *os.File {
+	path := sessionStreamPath(projectPath, sessionID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil
+	}
+	return f
 }
 
 // buildFirstPrompt compone il prompt del primo turno: istruzioni + (se presenti)
@@ -50,7 +123,7 @@ func buildFirstPrompt(instructions string, ticketID int, hasFiles bool) string {
 	}
 	if hasFiles {
 		fmt.Fprintf(&b, "Gli allegati del ticket #%d sono nella cartella "+
-			".tickets/%d/attachments/ (relativa alla radice del repo). "+
+			".agent-runner/attachments/%d/ (relativa alla radice del repo). "+
 			"Leggili prima di iniziare.", ticketID, ticketID)
 	}
 	return b.String()
