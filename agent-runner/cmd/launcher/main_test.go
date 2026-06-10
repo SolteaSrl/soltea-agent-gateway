@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestApplyPendingIfAny_RotatesWorkerAndConsumesMarker(t *testing.T) {
@@ -191,6 +192,57 @@ func TestWriteAtomic_TmpRenameSucceeds(t *testing.T) {
 	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf(".tmp residuo: %v", err)
 	}
+}
+
+func TestBuildServiceConfig_PersistsAllRelevantArgs(t *testing.T) {
+	opt := Options{
+		Worker:     `C:\Devel\soltea-agent\agent-runner.exe`,
+		WorkerArgs: "",
+		Gateway:    "https://projectopen.soltea.it/agents",
+		Poll:       time.Hour,
+		Canary:     60 * time.Second,
+	}
+	cfg := buildServiceConfig(opt)
+	if cfg.Name != ServiceName {
+		t.Errorf("Name=%q want=%q", cfg.Name, ServiceName)
+	}
+	if cfg.DisplayName == "" || cfg.Description == "" {
+		t.Errorf("Display/Description vuoti: %+v", cfg)
+	}
+	// Gli args persistiti devono contenere worker+gateway+poll+canary, NON
+	// worker-args (vuoto).
+	args := cfg.Arguments
+	mustContain := []string{"-worker", opt.Worker, "-gateway", opt.Gateway, "-poll", "1h0m0s", "-canary", "1m0s"}
+	for _, want := range mustContain {
+		if !contains(args, want) {
+			t.Errorf("Arguments=%v non contiene %q", args, want)
+		}
+	}
+	if contains(args, "-worker-args") {
+		t.Errorf("Arguments include -worker-args anche se vuoto: %v", args)
+	}
+}
+
+func TestBuildServiceConfig_OmitsEmptyOptions(t *testing.T) {
+	opt := Options{Worker: "/x/agent-runner"} // niente gateway/poll/canary/worker-args
+	cfg := buildServiceConfig(opt)
+	for _, banned := range []string{"-gateway", "-worker-args"} {
+		if contains(cfg.Arguments, banned) {
+			t.Errorf("Arguments=%v include %q quando opzione e' vuota", cfg.Arguments, banned)
+		}
+	}
+	if !contains(cfg.Arguments, "-worker") {
+		t.Errorf("Arguments=%v dovrebbe contenere -worker", cfg.Arguments)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBytesTrim_StripsWhitespaceBothEnds(t *testing.T) {

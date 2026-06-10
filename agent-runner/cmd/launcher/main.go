@@ -11,18 +11,29 @@
 //     <worker>.old esiste -> ROLLBACK (rinomina .old -> worker), backoff
 //     e riavvio col vecchio.
 //   - exit normale > canary: backoff incrementale (max 30s) e restart.
-//   - Loop infinito finche' non riceve SIGINT/SIGTERM.
+//   - Loop infinito finche' non riceve SIGINT/SIGTERM o lo Stop del servizio.
 //
-// E' un binario *minimale* (~stdlib only): si aggiorna RARAMENTE, perche'
-// e' lui che aggiorna il worker. In Windows lo si registra come servizio al
-// posto di agent-runner.exe; il worker NON si registra piu' come servizio.
+// Verbi (come il worker):
 //
-// Uso tipico:
+//	install | uninstall | start | stop | restart  -> gestisce il servizio Windows
+//	run | debug                                    -> avvio in foreground (debug)
+//	(vuoto)                                        -> avviato dal SCM (servizio)
 //
-//	agent-launcher.exe                    (config.json e worker accanto)
-//	agent-launcher.exe -worker C:\Devel\soltea-agent\agent-runner.exe \
-//	    -gateway https://projectopen.soltea.it/agents \
-//	    -poll 60m -canary 60s
+// I flag (-worker / -gateway / -poll / -canary / -worker-args) vanno passati
+// PRIMA del verbo e in install vengono persistiti come Arguments del servizio
+// (saranno rilanciati identici al boot del servizio).
+//
+// E' un binario *minimale*: si aggiorna RARAMENTE, perche' e' lui che
+// aggiorna il worker. Nome del servizio: "SolteaAgentLauncher" (simmetrico
+// a "SolteaAgentRunner" del worker, da disinstallare).
+//
+// Esempi:
+//
+//	agent-launcher.exe -gateway https://projectopen.soltea.it/agents \
+//	    -poll 60m -canary 60s install
+//	agent-launcher.exe start
+//	agent-launcher.exe stop
+//	agent-launcher.exe uninstall
 package main
 
 import (
@@ -37,13 +48,53 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kardianos/service"
+
 	"github.com/marcelloobertisolte-lab/soltea-agent-gateway/agent-runner/internal/selfupdate"
 )
+
+// ServiceName e' il nome del servizio Windows del launcher (intenzionalmente
+// diverso da "SolteaAgentRunner" del worker per non avere collisioni durante
+// la transizione e per renderlo riconoscibile in services.msc).
+const ServiceName = "SolteaAgentLauncher"
+const ServiceDisplayName = "Soltea Agent Launcher"
+const ServiceDescription = "Supervisor dell'agent-runner Soltea: polla il gateway per gli aggiornamenti del worker, gestisce canary/rollback e lo spawna come sottoprocesso."
 
 // ExitCodeUpdateReady (75 = EX_TEMPFAIL su BSD) e' il codice riservato per il
 // worker per dire "ho qualcosa da aggiornare, rilanciami". Il launcher lo
 // riconosce come exit "intenzionale" -> NESSUN rollback, applica pending.
 const ExitCodeUpdateReady = 75
+
+// Options raccoglie i parametri operativi del launcher (sia per foreground
+// che per il servizio Windows). Vengono parsati dai flag.
+type Options struct {
+	Worker     string
+	WorkerArgs string
+	Gateway    string
+	Poll       time.Duration
+	Canary     time.Duration
+	Once       bool
+}
+
+// program implementa service.Interface per kardianos/service.
+type program struct {
+	opt    Options
+	cancel context.CancelFunc
+}
+
+func (p *program) Start(s service.Service) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	go runLoop(ctx, p.opt)
+	return nil
+}
+
+func (p *program) Stop(s service.Service) error {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	return nil
+}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
@@ -57,15 +108,86 @@ func main() {
 	canary := flag.Duration("canary", 60*time.Second, "se il worker exit con err entro questo tempo -> rollback")
 	once := flag.Bool("once", false, "lancia il worker UNA volta e exit (per test)")
 	flag.Parse()
+	verb := flag.Arg(0)
 
-	if _, err := os.Stat(*worker); err != nil {
-		log.Fatalf("worker non trovato: %s (%v)", *worker, err)
+	opt := Options{
+		Worker: *worker, WorkerArgs: *workerArgs, Gateway: *gateway,
+		Poll: *poll, Canary: *canary, Once: *once,
 	}
 
+	prg := &program{opt: opt}
+	svcConfig := buildServiceConfig(opt)
+	s, err := service.New(prg, svcConfig)
+	if err != nil {
+		log.Fatalf("init servizio: %v", err)
+	}
+
+	switch verb {
+	case "":
+		// Avviato dal SCM (servizio) o eseguibile lanciato senza verbi. La
+		// libreria kardianos rileva il contesto: se siamo nel servizio,
+		// `s.Run()` blocca chiamando Start/Stop sul SCM; se siamo in console,
+		// si comporta come "foreground" e blocca finche' Ctrl+C non chiude.
+		if err := s.Run(); err != nil {
+			log.Fatalf("run: %v", err)
+		}
+	case "run", "debug":
+		// Foreground esplicito: stesso loop, ma stampiamo subito i parametri
+		// e gestiamo Ctrl+C noi (utile per il debug locale).
+		runForeground(opt)
+	case "install":
+		if err := service.Control(s, "install"); err != nil {
+			log.Fatalf("install: %v", err)
+		}
+		log.Printf("'install' eseguito. Argomenti registrati nel servizio: %v", svcConfig.Arguments)
+	case "uninstall", "start", "stop", "restart":
+		if err := service.Control(s, verb); err != nil {
+			log.Fatalf("%s: %v", verb, err)
+		}
+		log.Printf("'%s' eseguito.", verb)
+	default:
+		fmt.Fprintf(os.Stderr, "verbo sconosciuto: %q\n", verb)
+		fmt.Fprintln(os.Stderr, "usa: install | uninstall | start | stop | restart | run")
+		os.Exit(2)
+	}
+}
+
+// buildServiceConfig costruisce il service.Config con gli args persistenti.
+// All'install, gli args vengono salvati nel binPath del servizio Windows: il
+// servizio rilancia il launcher con ESATTAMENTE questi parametri.
+func buildServiceConfig(opt Options) *service.Config {
+	args := []string{}
+	if opt.Worker != "" {
+		args = append(args, "-worker", opt.Worker)
+	}
+	if opt.WorkerArgs != "" {
+		args = append(args, "-worker-args", opt.WorkerArgs)
+	}
+	if opt.Gateway != "" {
+		args = append(args, "-gateway", opt.Gateway)
+	}
+	if opt.Poll != 0 {
+		args = append(args, "-poll", opt.Poll.String())
+	}
+	if opt.Canary != 0 {
+		args = append(args, "-canary", opt.Canary.String())
+	}
+	return &service.Config{
+		Name:        ServiceName,
+		DisplayName: ServiceDisplayName,
+		Description: ServiceDescription,
+		Arguments:   args,
+	}
+}
+
+// runForeground replica il blocco "run loop + ctrl+c" che fa il SCM, per i
+// verbi "run"/"debug" usati in console.
+func runForeground(opt Options) {
+	if _, err := os.Stat(opt.Worker); err != nil {
+		log.Fatalf("worker non trovato: %s (%v)", opt.Worker, err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// Cattura SIGINT/SIGTERM per spegnimento ordinato.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -73,12 +195,19 @@ func main() {
 		log.Printf("ricevuto %s: shutting down", s)
 		cancel()
 	}()
+	runLoop(ctx, opt)
+}
 
-	// Poll dello update in background. Indipendente dal worker (gira anche
-	// mentre il worker e' attivo: non lo disturba, scrive solo .new + marker).
-	if *gateway != "" {
-		log.Printf("auto-update: poll %s ogni %s", *gateway, *poll)
-		go updatePollLoop(ctx, *gateway, *worker, *poll)
+// runLoop e' il cuore del launcher: poll + spawn worker + canary/rollback.
+// Usato sia dal program.Start (in goroutine) sia da runForeground (bloccante).
+func runLoop(ctx context.Context, opt Options) {
+	if _, err := os.Stat(opt.Worker); err != nil {
+		log.Printf("worker non trovato: %s (%v) -- esco", opt.Worker, err)
+		return
+	}
+	if opt.Gateway != "" {
+		log.Printf("auto-update: poll %s ogni %s", opt.Gateway, opt.Poll)
+		go updatePollLoop(ctx, opt.Gateway, opt.Worker, opt.Poll)
 	} else {
 		log.Printf("auto-update: disabilitato (no -gateway)")
 	}
@@ -86,20 +215,19 @@ func main() {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 	for ctx.Err() == nil {
-		applyPendingIfAny(*worker)
+		applyPendingIfAny(opt.Worker)
 
-		code, dur := runWorker(ctx, *worker, *workerArgs)
+		code, dur := runWorker(ctx, opt.Worker, opt.WorkerArgs)
 		log.Printf("worker exit: code=%d durata=%s", code, dur)
 
 		switch {
 		case ctx.Err() != nil:
 			return
 		case code == ExitCodeUpdateReady:
-			// Update richiesto: applica al prossimo giro, niente backoff.
 			backoff = time.Second
 			log.Printf("worker richiede update -> applico al prossimo ciclo")
-		case code != 0 && dur < *canary && rollback(*worker):
-			log.Printf("CANARY FAILED (exit %d in %s < %s) -> ROLLBACK eseguito", code, dur, *canary)
+		case code != 0 && dur < opt.Canary && rollback(opt.Worker):
+			log.Printf("CANARY FAILED (exit %d in %s < %s) -> ROLLBACK eseguito", code, dur, opt.Canary)
 			backoff = time.Second
 		case code != 0:
 			log.Printf("worker exit con errore -> restart fra %s", backoff)
@@ -111,7 +239,7 @@ func main() {
 			backoff = time.Second
 		}
 
-		if *once {
+		if opt.Once {
 			return
 		}
 	}
