@@ -210,14 +210,24 @@ func runForeground(opt Options) {
 
 // runLoop e' il cuore del launcher: poll + spawn worker + canary/rollback.
 // Usato sia dal program.Start (in goroutine) sia da runForeground (bloccante).
+//
+// `updateReady` e' il canale su cui updatePollLoop notifica "ho appena scaricato
+// un nuovo .new pronto da applicare". Il loop principale, quando lo vede,
+// killa il worker corrente cosi' al prossimo giro applyPendingIfAny puo'
+// rotear i file. Senza questo, il worker (che gira come server e non esce
+// mai da solo) terrebbe il vecchio binario in eterno e il poll continuerebbe
+// a riscaricare il .new ad ogni tick.
 func runLoop(ctx context.Context, opt Options) {
 	if _, err := os.Stat(opt.Worker); err != nil {
 		log.Printf("worker non trovato: %s (%v) -- esco", opt.Worker, err)
 		return
 	}
+	// Buffer 1: il poll loop notifica al massimo "ho un update", se il main loop
+	// non lo ha ancora consumato il secondo invio viene scartato.
+	updateReady := make(chan struct{}, 1)
 	if opt.Gateway != "" {
 		log.Printf("auto-update: poll %s ogni %s", opt.Gateway, opt.Poll)
-		go updatePollLoop(ctx, opt.Gateway, opt.Worker, opt.Poll)
+		go updatePollLoop(ctx, opt.Gateway, opt.Worker, opt.Poll, updateReady)
 	} else {
 		log.Printf("auto-update: disabilitato (no -gateway)")
 	}
@@ -227,12 +237,17 @@ func runLoop(ctx context.Context, opt Options) {
 	for ctx.Err() == nil {
 		applyPendingIfAny(opt.Worker)
 
-		code, dur := runWorker(ctx, opt.Worker, opt.WorkerArgs)
-		log.Printf("worker exit: code=%d durata=%s", code, dur)
+		code, dur, killedForUpdate := runWorker(ctx, opt.Worker, opt.WorkerArgs, updateReady)
+		log.Printf("worker exit: code=%d durata=%s killedForUpdate=%v", code, dur, killedForUpdate)
 
 		switch {
 		case ctx.Err() != nil:
 			return
+		case killedForUpdate:
+			// Kill volontario per applicare update: niente canary/rollback,
+			// niente backoff, applyPending al prossimo giro.
+			backoff = time.Second
+			log.Printf("worker terminato per applicare update -> apply al prossimo ciclo")
 		case code == ExitCodeUpdateReady:
 			backoff = time.Second
 			log.Printf("worker richiede update -> applico al prossimo ciclo")
@@ -255,24 +270,48 @@ func runLoop(ctx context.Context, opt Options) {
 	}
 }
 
-// runWorker spawna il worker, attende l'exit, ritorna (exitCode, durata).
-// Su SIGINT/SIGTERM del padre, il worker viene segnalato a sua volta.
-func runWorker(ctx context.Context, worker, extraArgs string) (int, time.Duration) {
+// runWorker spawna il worker e attende uno fra: exit naturale, ctx.Done,
+// segnale di update scaricato. Ritorna (exitCode, durata, killedForUpdate).
+//
+// Se `updateReady` riceve un segnale prima dell'exit naturale, il worker
+// viene Killato (TerminateProcess su Windows) per permettere a
+// applyPendingIfAny di ruotare i file al prossimo giro.
+func runWorker(ctx context.Context, worker, extraArgs string, updateReady <-chan struct{}) (int, time.Duration, bool) {
 	args := splitArgs(extraArgs)
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, worker, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		log.Printf("avvio worker fallito: %v", err)
+		return -1, time.Since(start), false
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	killedForUpdate := false
+	select {
+	case <-updateReady:
+		log.Printf("rilevato update pronto -> kill del worker per applicarlo")
+		killedForUpdate = true
+		_ = cmd.Process.Kill()
+		<-done
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		<-done
+		return -1, time.Since(start), false
+	case err := <-done:
+		if err == nil {
+			return 0, time.Since(start), false
+		}
 		var exitErr *exec.ExitError
 		if asExit(err, &exitErr) {
-			return exitErr.ExitCode(), time.Since(start)
+			return exitErr.ExitCode(), time.Since(start), false
 		}
-		// errore non-exit (impossibile avviare): pretendiamo code -1 e bailout breve.
-		log.Printf("avvio worker fallito: %v", err)
-		return -1, time.Since(start)
+		log.Printf("worker terminato con errore non-exit: %v", err)
+		return -1, time.Since(start), false
 	}
-	return 0, time.Since(start)
+	return 0, time.Since(start), killedForUpdate
 }
 
 // asExit fa un type assert dato che errors.As non e' importato (stdlib-only-ish).
@@ -369,7 +408,17 @@ func rollback(worker string) bool {
 // updatePollLoop polla /runner/latest e scarica i nuovi .new. Tick "subito +
 // ogni poll": al boot del launcher controlliamo subito, cosi' un update gia'
 // pronto sul gateway entra in vigore al primo avvio.
-func updatePollLoop(ctx context.Context, gatewayBase, worker string, every time.Duration) {
+//
+// Quando un download va a buon fine, notifica `updateReady` (non bloccante:
+// se il main loop non lo ha ancora consumato, il segnale precedente vince e
+// questo viene scartato). Il main loop killera' il worker per applicare.
+//
+// Skip-download intelligente: se .update-pending esiste gia' per la versione
+// "latest", evitiamo di ri-scaricare. Necessario perche' il worker non esce
+// mai da solo, e senza questo check il poll riscarica il .new ad ogni tick
+// (overhead di rete + churn del filesystem) finche' il main loop non killa
+// il worker.
+func updatePollLoop(ctx context.Context, gatewayBase, worker string, every time.Duration, updateReady chan<- struct{}) {
 	client := &selfupdate.Client{GatewayBase: gatewayBase}
 	doCheck := func() {
 		current := currentWorkerVersion(worker)
@@ -385,12 +434,21 @@ func updatePollLoop(ctx context.Context, gatewayBase, worker string, every time.
 			log.Printf("update check: versione corrente %q == latest %q, niente da fare", current, m.Version)
 			return
 		}
+		// Evita di riscaricare se il .new e il marker pending per la STESSA
+		// versione esistono gia': aspettiamo solo che il main loop killi il
+		// worker e applichi.
+		if mk, err := selfupdate.ReadPending(worker); err == nil && mk.Version == m.Version {
+			log.Printf("update gia' scaricato: %q pronto in attesa di apply, notifico main loop", m.Version)
+			notifyUpdateReady(updateReady)
+			return
+		}
 		log.Printf("update disponibile: %q -> %q", current, m.Version)
 		if err := client.Download(ctx, worker, *m); err != nil {
 			log.Printf("download update: errore %v", err)
 			return
 		}
-		log.Printf("update SCARICATO: v%s pronto in %s.new (verra' applicato al prossimo restart del worker)", m.Version, filepath.Base(worker))
+		log.Printf("update SCARICATO: v%s pronto in %s.new", m.Version, filepath.Base(worker))
+		notifyUpdateReady(updateReady)
 	}
 	doCheck()
 	t := time.NewTicker(every)
@@ -402,6 +460,19 @@ func updatePollLoop(ctx context.Context, gatewayBase, worker string, every time.
 		case <-t.C:
 			doCheck()
 		}
+	}
+}
+
+// notifyUpdateReady manda un segnale non bloccante al main loop. Buffer=1:
+// se non e' ancora stato consumato, il successivo viene scartato (l'effetto
+// e' lo stesso, l'update e' pronto e basta).
+func notifyUpdateReady(ch chan<- struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
 	}
 }
 
