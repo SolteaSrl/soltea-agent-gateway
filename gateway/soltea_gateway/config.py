@@ -57,6 +57,13 @@ class Config:
     # subito invece di consumare RAM in modo non limitato o droppare frame
     # silenziosamente).
     orphan_buffer_max_frames: int = 1000
+    # Auto-update del runner: il gateway pubblica via /runner/latest la versione
+    # consigliata, l'URL del binario e il suo SHA256. Il launcher Windows polla
+    # questo endpoint e scarica se serve. Se `runner_latest_version` e' "" l'auto-
+    # update e' disabilitato (l'endpoint risponde 404).
+    runner_latest_version: str = ""
+    runner_latest_url: str = ""
+    runner_latest_sha256: str = ""
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
@@ -76,6 +83,9 @@ class Config:
             heartbeat_seconds=int(e.get("GW_HEARTBEAT_SECONDS", "30")),
             orphan_grace_seconds=int(e.get("GW_ORPHAN_GRACE_SECONDS", "60")),
             orphan_buffer_max_frames=int(e.get("GW_ORPHAN_BUFFER_MAX_FRAMES", "1000")),
+            runner_latest_version=e.get("GW_RUNNER_LATEST_VERSION", ""),
+            runner_latest_url=e.get("GW_RUNNER_LATEST_URL", ""),
+            runner_latest_sha256=e.get("GW_RUNNER_LATEST_SHA256", ""),
         )
 
     def check_agent_token(self, agent_id: str, token: str) -> bool:
