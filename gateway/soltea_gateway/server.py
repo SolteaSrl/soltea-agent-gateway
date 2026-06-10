@@ -207,6 +207,25 @@ async def _handle_hello(
     role = hello.get("role")
     token = hello.get("token", "")
 
+    # Versione protocollo: il runner la dichiara, l'orchestratrice e' interna
+    # quindi non la richiediamo. Se assente assumiamo 1 (compat con v0.4.x).
+    peer_proto = hello.get("protocol_version", P.PROTOCOL_VERSION)
+    try:
+        peer_proto = int(peer_proto)
+    except (TypeError, ValueError):
+        await ws.send_json(P.error(P.ERR_BAD_HELLO, "protocol_version deve essere intero."))
+        return None
+    if role == P.ROLE_AGENT and peer_proto < P.MIN_RUNNER_PROTOCOL_VERSION:
+        await ws.send_json(
+            P.error(
+                P.ERR_PROTOCOL_INCOMPATIBLE,
+                f"Runner protocol_version={peer_proto} < minimo richiesto "
+                f"{P.MIN_RUNNER_PROTOCOL_VERSION}. Aggiorna il runner.",
+                gateway_protocol_version=P.PROTOCOL_VERSION,
+            )
+        )
+        return None
+
     if role == P.ROLE_AGENT:
         agent_id = hello.get("agent_id")
         if not agent_id:
@@ -226,11 +245,12 @@ async def _handle_hello(
                 "agent_id": agent_id,
                 "registered_projects": sorted(entry.projects.keys()),
                 "heartbeat_seconds": cfg.heartbeat_seconds,
+                "protocol_version": P.PROTOCOL_VERSION,
             }
         )
         log.info(
-            "Agente registrato: %s progetti=%s runner=%s",
-            agent_id, sorted(entry.projects.keys()), entry.runner_version or "?",
+            "Agente registrato: %s progetti=%s runner=%s proto=%d",
+            agent_id, sorted(entry.projects.keys()), entry.runner_version or "?", peer_proto,
         )
         return conn
 
@@ -242,7 +262,8 @@ async def _handle_hello(
         conn = Connection(ws, P.ROLE_ORCHESTRATOR, client_id)
         await conn.send(
             {"type": P.WELCOME, "session_scope": "orchestrator", "client_id": client_id,
-             "heartbeat_seconds": cfg.heartbeat_seconds}
+             "heartbeat_seconds": cfg.heartbeat_seconds,
+             "protocol_version": P.PROTOCOL_VERSION}
         )
         log.info("Orchestratrice connessa: %s", client_id)
         return conn
@@ -313,9 +334,12 @@ async def _handle_orchestrator_frame(
                 "instructions": frame.get("instructions", ""),
             }
         )
-        # Confermiamo all'orchestratrice il session_id assegnato.
+        # Confermiamo all'orchestratrice il session_id + versione del runner
+        # che ha preso in carico la sessione (utile per diagnostica e per il
+        # CLI orchestratrice senza dover incrociare list_agents).
         await conn.send({"type": "session_opened", "req_id": frame.get("req_id"),
-                         "session_id": sess.session_id, "agent_id": entry.agent_id})
+                         "session_id": sess.session_id, "agent_id": entry.agent_id,
+                         "runner_version": entry.runner_version or None})
         return
 
     if ftype in (P.CHAT_SEND, P.TASK_DONE):

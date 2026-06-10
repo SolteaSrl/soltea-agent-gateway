@@ -3,6 +3,11 @@ from __future__ import annotations
 
 from typing import Any
 
+# Versione del protocollo gateway<->runner. Il runner la dichiara nel frame
+# `hello`; se assente, il gateway assume 1 per retrocompat con runner v0.4.x.
+PROTOCOL_VERSION = 1
+MIN_RUNNER_PROTOCOL_VERSION = 1
+
 # --- tipi di frame ---
 HELLO = "hello"
 WELCOME = "welcome"
@@ -26,6 +31,7 @@ ROLE_ORCHESTRATOR = "orchestrator"
 # --- codici d'errore ---
 ERR_UNAUTHORIZED = "unauthorized"
 ERR_BAD_HELLO = "bad_hello"
+ERR_PROTOCOL_INCOMPATIBLE = "protocol_incompatible"
 ERR_NO_AGENT = "no_agent_for_project"
 ERR_PROJECT_NOT_DECLARED = "project_not_declared"
 ERR_UNKNOWN_SESSION = "unknown_session"
