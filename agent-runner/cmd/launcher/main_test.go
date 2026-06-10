@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -220,6 +221,86 @@ func TestBuildServiceConfig_PersistsAllRelevantArgs(t *testing.T) {
 	}
 	if contains(args, "-worker-args") {
 		t.Errorf("Arguments include -worker-args anche se vuoto: %v", args)
+	}
+}
+
+func TestNotifyUpdateReady_NonBlockingWithFullBuffer(t *testing.T) {
+	ch := make(chan struct{}, 1)
+	notifyUpdateReady(ch)  // primo invio ok
+	notifyUpdateReady(ch)  // secondo invio NON deve bloccare
+	notifyUpdateReady(nil) // nil channel: no panic
+	if len(ch) != 1 {
+		t.Errorf("len(ch)=%d want=1", len(ch))
+	}
+}
+
+func TestRunWorker_UpdateReadyKillsWorkerAndReturnsKilledFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("test richiede sleep reale")
+	}
+	tmp := t.TempDir()
+	// Fake worker che vive 30s se nessuno lo killa.
+	worker := filepath.Join(tmp, "fake-sleeper.sh")
+	if err := os.WriteFile(worker, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatalf("write worker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	updateReady := make(chan struct{}, 1)
+	// Notifica l'update dopo 200ms.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		notifyUpdateReady(updateReady)
+	}()
+	t0 := time.Now()
+	code, dur, killed := runWorker(ctx, worker, "", updateReady)
+	elapsed := time.Since(t0)
+	if !killed {
+		t.Errorf("killedForUpdate=false want=true")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("runWorker non e' tornato subito: %s", elapsed)
+	}
+	if dur > 2*time.Second {
+		t.Errorf("dur=%s troppo alta", dur)
+	}
+	_ = code // su Linux sleep killato -> code potrebbe essere 0 con killed=true
+}
+
+func TestRunWorker_NaturalExitDoesNotMarkKilled(t *testing.T) {
+	tmp := t.TempDir()
+	// Fake worker che esce subito con code=0.
+	worker := filepath.Join(tmp, "fake-quick.sh")
+	if err := os.WriteFile(worker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	updateReady := make(chan struct{}, 1) // mai notificato
+	code, _, killed := runWorker(ctx, worker, "", updateReady)
+	if killed {
+		t.Errorf("killedForUpdate=true ma worker e' uscito da solo")
+	}
+	if code != 0 {
+		t.Errorf("code=%d want=0", code)
+	}
+}
+
+func TestRunWorker_ExitCodeNonZeroPropagated(t *testing.T) {
+	tmp := t.TempDir()
+	worker := filepath.Join(tmp, "fake-fail.sh")
+	_ = os.WriteFile(worker, []byte("#!/bin/sh\nexit 17\n"), 0o755)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	updateReady := make(chan struct{}, 1)
+	code, _, killed := runWorker(ctx, worker, "", updateReady)
+	if killed {
+		t.Error("killed=true ma worker e' uscito da solo")
+	}
+	if code != 17 {
+		t.Errorf("code=%d want=17", code)
 	}
 }
 
