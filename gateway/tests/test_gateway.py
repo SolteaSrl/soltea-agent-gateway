@@ -211,6 +211,46 @@ def test_revoke_invalidates_token(tmp_path: Path):
         assert frame["type"] == "error" and frame["code"] == "unauthorized"
 
 
+def test_runner_latest_404_when_not_configured(client: TestClient):
+    """Senza GW_RUNNER_LATEST_* configurati l'endpoint risponde 404 (auto-update off)."""
+    r = client.get("/runner/latest")
+    assert r.status_code == 404
+    assert r.json()["error"] == "not_configured"
+
+
+def test_runner_latest_returns_metadata_when_configured(tmp_path: Path):
+    cfg = Config(
+        orchestrator_token="orch-tok",
+        shared_agent_token="agent-tok",
+        blob_dir=tmp_path / "blobs",
+        runner_latest_version="0.6.0",
+        runner_latest_url="https://github.com/SolteaSrl/x/releases/download/runner-v0.6.0/agent-runner.exe",
+        runner_latest_sha256="455ec667deaf713cc5878d3301a67b10726c883747d857928923e720eb53abf0",
+    )
+    c = TestClient(create_app(cfg))
+    r = c.get("/runner/latest")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["version"] == "0.6.0"
+    assert body["asset_url"].endswith("agent-runner.exe")
+    assert len(body["sha256"]) == 64
+
+
+def test_runner_latest_no_auth_required(tmp_path: Path):
+    """L'endpoint NON deve richiedere auth: il launcher Windows polla
+    da rete non controllata e l'asset URL e' pubblico."""
+    cfg = Config(
+        orchestrator_token="orch-tok",
+        blob_dir=tmp_path / "blobs",
+        runner_latest_version="0.6.0",
+        runner_latest_url="https://x/y.exe",
+        runner_latest_sha256="a" * 64,
+    )
+    c = TestClient(create_app(cfg))
+    # Senza alcun header Authorization → 200 OK.
+    assert c.get("/runner/latest").status_code == 200
+
+
 def test_list_agents_reports_runner_version(client: TestClient):
     with client.websocket_connect("/ws") as agent, client.websocket_connect("/ws") as orch:
         _hello_agent(agent, runner_version="0.4.0")

@@ -85,6 +85,22 @@ def create_app(config: Config | None = None) -> FastAPI:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return JSONResponse({"agents": registry.snapshot()})
 
+    @app.get("/runner/latest")
+    async def runner_latest() -> Response:
+        """Versione runner consigliata + URL e SHA256 dell'asset.
+
+        No auth: l'asset URL e' tipicamente una release GitHub pubblica e
+        il launcher Windows polla da qualunque rete. Niente segreti qui.
+        Risponde 404 se l'admin non ha configurato GW_RUNNER_LATEST_*.
+        """
+        if not cfg.runner_latest_version or not cfg.runner_latest_url:
+            return JSONResponse({"error": "not_configured"}, status_code=404)
+        return JSONResponse({
+            "version": cfg.runner_latest_version,
+            "asset_url": cfg.runner_latest_url,
+            "sha256": cfg.runner_latest_sha256,
+        })
+
     @app.post("/provision")
     async def provision_agent(
         request: Request,
