@@ -204,6 +204,7 @@ func (a *Agent) handleTaskStart(ctx context.Context, conn *wsclient.Conn, in pro
 	res, err := a.runner.Run(ctx, workdir, prompt, claude.RunOptions{
 		OnDelta:    a.makeDeltaCallback(conn, in.SessionID, st),
 		StreamSink: streamFile,
+		AddDirs:    []string{projPath},
 	})
 	a.logClaudeRaw(slog, res)
 	if err != nil {
@@ -248,6 +249,7 @@ func (a *Agent) handleChatSend(ctx context.Context, conn *wsclient.Conn, in prot
 		ResumeSession: st.claudeSessionID,
 		OnDelta:       a.makeDeltaCallback(conn, in.SessionID, st),
 		StreamSink:    streamFile,
+		AddDirs:       []string{projPath},
 	})
 	a.logClaudeRaw(st.slog, res)
 	if err != nil {

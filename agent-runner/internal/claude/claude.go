@@ -51,10 +51,15 @@ func New(opt Options) *Runner { return &Runner{opt: opt} }
 // RunOptions raccoglie i parametri opzionali di Run. ResumeSession="" = nuova
 // sessione; OnDelta=nil = niente streaming verso il gateway; StreamSink=nil =
 // niente file ndjson live (il raw resta comunque dentro Result.RawStdout).
+// AddDirs sono path aggiuntivi che il CLI claude deve poter leggere/scrivere
+// oltre al workdir (passati come `--add-dir`): servono per esporre, ad es., la
+// radice del progetto e .agent-runner/attachments/, che vivono fuori dal
+// workdir scratch della sessione.
 type RunOptions struct {
 	ResumeSession string
 	OnDelta       func(text string)
 	StreamSink    io.Writer
+	AddDirs       []string
 }
 
 // Run esegue un turno di claude. Compat: per chi non usa opzioni esiste
@@ -67,7 +72,7 @@ type RunOptions struct {
 // blocchi text, thinking, tool_use, system, result) viene anche scritto su quel
 // writer in tempo reale: utile per salvarlo in <projectPath>/.agent-runner/streams/.
 func (r *Runner) Run(ctx context.Context, workdir, prompt string, opt RunOptions) (*Result, error) {
-	args := r.buildArgs(prompt, opt.ResumeSession)
+	args := r.buildArgs(prompt, opt.ResumeSession, opt.AddDirs)
 
 	var cmd *exec.Cmd
 	if r.opt.UseGitBash {
@@ -122,7 +127,7 @@ func (r *Runner) Run(ctx context.Context, workdir, prompt string, opt RunOptions
 	return res, nil
 }
 
-func (r *Runner) buildArgs(prompt, resumeSession string) []string {
+func (r *Runner) buildArgs(prompt, resumeSession string, addDirs []string) []string {
 	// --output-format stream-json + --verbose: NDJSON con eventi system/assistant/user/result.
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
 	if r.opt.PermissionMode != "" {
@@ -133,6 +138,12 @@ func (r *Runner) buildArgs(prompt, resumeSession string) []string {
 	}
 	if resumeSession != "" {
 		args = append(args, "--resume", resumeSession)
+	}
+	for _, d := range addDirs {
+		if d == "" {
+			continue
+		}
+		args = append(args, "--add-dir", d)
 	}
 	return args
 }
