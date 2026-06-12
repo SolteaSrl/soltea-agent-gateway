@@ -120,6 +120,35 @@ func TestParseStream_NoResultReturnsNilResult(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_AddDirsEmitsAddDirFlags(t *testing.T) {
+	// AddDirs deve produrre una coppia "--add-dir <path>" per ogni elemento non vuoto,
+	// nell'ordine in cui sono passati. Elementi vuoti vanno saltati senza emettere flag orfani.
+	r := New(Options{ClaudePath: "claude.exe"})
+	args := r.buildArgs("prompt", "", []string{"D:\\Prodotti\\Soltea\\WebSite2026", "", "C:\\Other"})
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--add-dir D:\\Prodotti\\Soltea\\WebSite2026") {
+		t.Errorf("manca --add-dir per il primo path: %q", joined)
+	}
+	if !strings.Contains(joined, "--add-dir C:\\Other") {
+		t.Errorf("manca --add-dir per il secondo path: %q", joined)
+	}
+	// Conta esattamente 2 occorrenze di --add-dir (gli "" non devono produrre flag).
+	if got := strings.Count(joined, "--add-dir"); got != 2 {
+		t.Errorf("--add-dir count=%d want=2 (args=%v)", got, args)
+	}
+}
+
+func TestBuildArgs_NoAddDirsWhenEmpty(t *testing.T) {
+	r := New(Options{ClaudePath: "claude.exe"})
+	args := r.buildArgs("prompt", "", nil)
+	for _, a := range args {
+		if a == "--add-dir" {
+			t.Fatalf("--add-dir emesso senza AddDirs: %v", args)
+		}
+	}
+}
+
 func TestParseStream_LongLineAboveDefaultScannerBuffer(t *testing.T) {
 	// Un blocco assistant da 200 KB supera il default Scanner buffer (64 KB):
 	// vogliamo che il parser non si pianti.
