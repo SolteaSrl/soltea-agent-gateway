@@ -8,4 +8,4 @@
 package version
 
 // Runner e' la versione del runner. Tenere allineata alle release agent-runner-vX.Y.Z.
-var Runner = "0.6.3"
+var Runner = "0.6.4"
